@@ -1,0 +1,15 @@
+# Nunca commitar segredos
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# Docker volumes locais
+data/
+
+# OS
+.DS_Store
+Thumbs.db

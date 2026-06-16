@@ -1,0 +1,96 @@
+services:
+
+  couchdb:
+    image: couchdb:3.3
+    container_name: obsidian-couchdb
+    restart: unless-stopped
+    environment:
+      COUCHDB_USER: ${COUCHDB_USER}
+      COUCHDB_PASSWORD: ${COUCHDB_PASSWORD}
+    ports:
+      - "5984:5984"
+    volumes:
+      - couchdb_data:/opt/couchdb/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5984/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - obsidian-net
+
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: obsidian-chromadb
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - chromadb_data:/chroma/chroma
+    environment:
+      IS_PERSISTENT: "TRUE"
+      ANONYMIZED_TELEMETRY: "FALSE"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - obsidian-net
+
+  watcher:
+    build:
+      context: ./watcher
+      dockerfile: Dockerfile
+    image: obsidian-watcher
+    container_name: obsidian-watcher
+    restart: unless-stopped
+    environment:
+      COUCHDB_URL: http://couchdb:5984
+      COUCHDB_USER: ${COUCHDB_USER}
+      COUCHDB_PASSWORD: ${COUCHDB_PASSWORD}
+      COUCHDB_DB: ${COUCHDB_DB}
+      CHROMADB_HOST: chromadb
+      CHROMADB_PORT: 8000
+    depends_on:
+      couchdb:
+        condition: service_healthy
+      chromadb:
+        condition: service_healthy
+    networks:
+      - obsidian-net
+
+  agent:
+    build:
+      context: ./agent
+      dockerfile: Dockerfile
+    image: obsidian-agent
+    container_name: obsidian-agent
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      COUCHDB_URL: http://couchdb:5984
+      COUCHDB_USER: ${COUCHDB_USER}
+      COUCHDB_PASSWORD: ${COUCHDB_PASSWORD}
+      COUCHDB_DB: ${COUCHDB_DB}
+      CHROMADB_HOST: chromadb
+      CHROMADB_PORT: 8000
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL}
+      FLASK_SECRET_KEY: ${FLASK_SECRET_KEY}
+    depends_on:
+      couchdb:
+        condition: service_healthy
+      chromadb:
+        condition: service_healthy
+    networks:
+      - obsidian-net
+
+volumes:
+  couchdb_data:
+  chromadb_data:
+
+networks:
+  obsidian-net:
+    driver: bridge
