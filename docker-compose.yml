@@ -26,12 +26,12 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - chromadb_data:/chroma/chroma
+      - chromadb_data:/data
     environment:
       IS_PERSISTENT: "TRUE"
       ANONYMIZED_TELEMETRY: "FALSE"
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8000/api/v1/heartbeat || curl -f http://localhost:8000/api/v2/heartbeat"]
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/heartbeat')\""]
       interval: 15s
       timeout: 10s
       retries: 10
