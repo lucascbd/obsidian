@@ -59,7 +59,7 @@ services:
     container_name: obsidian-agent
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "8088:8080"
     environment:
       COUCHDB_URL: http://couchdb:5984
       COUCHDB_USER: ${COUCHDB_USER}
