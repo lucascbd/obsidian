@@ -133,18 +133,20 @@ def repair_vault() -> dict:
     }
 
 def get_root_folders() -> list:
-    """Retorna as pastas raiz do vault (primeiro segmento de path das notas ativas)."""
+    """Retorna as pastas raiz do vault (primeiro segmento de path das notas ativas, não deletadas)."""
     try:
         r = requests.get(
             f"{COUCHDB_URL}/{COUCHDB_DB}/_all_docs",
-            params={"include_docs": False},
-            auth=COUCHDB_AUTH, timeout=15,
+            params={"include_docs": True},
+            auth=COUCHDB_AUTH, timeout=30,
         )
         r.raise_for_status()
         roots = set()
         for row in r.json().get("rows", []):
             nid = row["id"]
             if nid.startswith("_") or nid.startswith("h:"):
+                continue
+            if row.get("doc", {}).get("deleted"):
                 continue
             parts = nid.split("/")
             if len(parts) > 1:

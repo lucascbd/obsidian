@@ -435,6 +435,41 @@ def api_roots():
     return jsonify({"roots": get_root_folders()})
 
 
+@app.route("/api/vault-stats", methods=["GET"])
+def api_vault_stats():
+    """Diagnóstico: contagem de docs por tipo e lista de raízes."""
+    import requests as req
+    from agent import COUCHDB_URL, COUCHDB_DB, COUCHDB_AUTH
+    try:
+        r = req.get(f"{COUCHDB_URL}/{COUCHDB_DB}/_all_docs",
+                    params={"include_docs": True}, auth=COUCHDB_AUTH, timeout=30)
+        r.raise_for_status()
+        rows = r.json().get("rows", [])
+        active, deleted, leaves, system = [], [], [], []
+        for row in rows:
+            nid = row["id"]
+            doc = row.get("doc", {})
+            if nid.startswith("_"):
+                system.append(nid)
+            elif nid.startswith("h:"):
+                leaves.append(nid)
+            elif doc.get("deleted"):
+                deleted.append(nid)
+            else:
+                active.append(nid)
+        return jsonify({
+            "total_docs": len(rows),
+            "active_notes": len(active),
+            "deleted_notes": len(deleted),
+            "leaf_docs": len(leaves),
+            "system_docs": len(system),
+            "active_note_ids": sorted(active),
+            "deleted_note_ids": sorted(deleted),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/ask", methods=["POST"])
 def api_ask():
     data        = request.get_json()
