@@ -6,7 +6,7 @@ import os
 import logging
 from flask import Flask, request, jsonify, render_template_string
 from flask_cors import CORS
-from agent import ask, weekly_summary, market_insights, summarize_meeting, vault_review
+from agent import ask, weekly_summary, market_insights, summarize_meeting, vault_review, repair_vault
 
 logging.basicConfig(
     level=logging.INFO,
@@ -334,6 +334,11 @@ def api_insights():
 @app.route("/api/vault-review", methods=["POST"])
 def api_vault_review():
     return jsonify(vault_review())
+
+
+@app.route("/api/repair", methods=["POST"])
+def api_repair():
+    return jsonify(repair_vault())
 
 
 @app.route("/api/meeting", methods=["POST"])

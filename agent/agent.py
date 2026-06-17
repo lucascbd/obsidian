@@ -96,7 +96,36 @@ def _write_note_content(doc: dict, new_content: str) -> bool:
 
 
 # ── Tools disponíveis para o agente ──────────────────────────────────────────
-def tool_search_vault(query: str, collections: list | None = None) -> str:
+def repair_vault() -> dict:
+    """Corrige size mismatch em documentos do CouchDB."""
+    r = requests.get(
+        f"{COUCHDB_URL}/{COUCHDB_DB}/_all_docs",
+        params={"include_docs": True},
+        auth=COUCHDB_AUTH, timeout=30,
+    )
+    r.raise_for_status()
+    fixed = []
+    for row in r.json().get("rows", []):
+        doc = row.get("doc", {})
+        if doc.get("deleted") or doc.get("type") != "plain" or doc["_id"].startswith("_") or doc["_id"].startswith("h:"):
+            continue
+        content = _read_note_content(doc)
+        real_size = len(content.encode("utf-8"))
+        if doc.get("size", -1) != real_size:
+            import time
+            doc["size"] = real_size
+            doc["mtime"] = int(time.time() * 1000)
+            try:
+                _couch("put", doc["_id"], json=doc)
+                fixed.append(f"{doc['_id']} ({doc.get('size', '?')} → {real_size})")
+                log.info(f"Reparado: {doc['_id']}")
+            except Exception as e:
+                log.error(f"Erro ao reparar {doc['_id']}: {e}")
+    return {
+        "answer": f"{len(fixed)} documento(s) reparado(s).\n" + "\n".join(fixed) if fixed else "Nenhum documento com size incorreto encontrado.",
+        "sources": fixed,
+    }
+(query: str, collections: list | None = None) -> str:
     """Busca semântica no vault via ChromaDB."""
     cols  = collections or COLLECTIONS
     model = get_embed_model()
