@@ -12,7 +12,7 @@ services:
     volumes:
       - couchdb_data:/opt/couchdb/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5984/"]
+      test: ["CMD", "curl", "-f", "-u", "${COUCHDB_USER}:${COUCHDB_PASSWORD}", "http://localhost:5984/"]
       interval: 10s
       timeout: 5s
       retries: 10
