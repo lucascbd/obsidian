@@ -11,12 +11,13 @@ services:
       - "5984:5984"
     volumes:
       - couchdb_data:/opt/couchdb/data
-      - ./couchdb/local.ini:/opt/couchdb/etc/local.d/livesync.ini:ro
+      - ./couchdb/local.ini:/opt/couchdb/etc/local.d/livesync.ini
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5984/"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 30s
     networks:
       - obsidian-net
 
