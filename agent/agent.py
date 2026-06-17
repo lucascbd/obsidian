@@ -253,35 +253,38 @@ def _extract_text_from_url(url: str) -> str:
     return markdownify.markdownify(str(main), heading_style="ATX")
 
 
-INGEST_PROMPT = """Você é um assistente que converte conteúdo bruto em notas Obsidian bem estruturadas.
+INGEST_PROMPT = """Você é o Mordomo do Conhecimento. Converta o conteúdo abaixo em uma nota Obsidian bem estruturada.
 
-Dado o conteúdo extraído abaixo, você deve:
-1. Escolher a pasta correta:
-   - 00-inbox        → rascunhos, conteúdo não categorizado
-   - 01-projetos     → projetos, iniciativas, planos
-   - 02-analises     → análises, estudos, relatórios
-   - 03-stakeholders → pessoas, empresas, parceiros
-   - 04-referencias  → artigos, livros, fontes externas
-   - 05-reunioes     → atas de reunião, encontros
-2. Criar um slug de nome de arquivo (lowercase, hifens, sem acentos, .md)
-3. Escrever a nota em markdown com:
-   - Frontmatter YAML: title, date (hoje), source (se URL), tags
-   - Seções bem organizadas com # ## ###
+INSTRUÇÕES:
+1. Analise o conteúdo e decida a pasta/subpasta mais semântica para ele.
+   - Use hierarquias temáticas livres. Exemplos:
+     - Um artigo sobre IA → "tecnologia/inteligencia-artificial/artigo-nome.md"
+     - Uma ata de reunião → "reunioes/2024/cliente-x-kick-off.md"
+     - Perfil de empresa  → "empresas/nome-empresa/perfil.md"
+     - Relatório de mercado → "mercado/latam/nome-relatorio.md"
+   - Seja específico. Prefira "projetos/saas-b2b/roadmap-q1.md" a "projetos/nota.md"
+2. Crie slug lowercase com hifens, sem acentos.
+3. Escreva a nota em markdown com:
+   - Frontmatter YAML: title, date (hoje: {today}), source (se URL/arquivo), tags (3-5 relevantes)
+   - Seções organizadas com # ## ###
    - Linguagem concisa em português
-4. Ao final, liste wiki links para notas existentes no vault que sejam relacionadas.
+   - Wiki links para notas do vault que sejam relacionadas: [[caminho/nota|Nome]]
+4. Se o conteúdo mencionar pessoas, empresas, projetos que não têm nota no vault, crie entradas no campo "related_notes_to_create" para que o agente crie depois.
 
 NOTAS EXISTENTES NO VAULT:
 {note_ids}
 
 Responda APENAS com um JSON no formato:
-{{"path": "01-projetos/nome-do-arquivo.md", "content": "conteúdo completo da nota", "summary": "1-2 frases descrevendo o que foi criado"}}"""
+{{"path": "pasta/subpasta/nome.md", "content": "conteúdo completo da nota", "summary": "1-2 frases descrevendo o que foi criado"}}"""
 
 
 def ingest(raw_text: str, source_name: str) -> dict:
     """Converte texto bruto em nota Obsidian e salva no vault."""
+    import datetime
     note_ids = tool_list_notes()
+    today = datetime.date.today().isoformat()
 
-    prompt = INGEST_PROMPT.replace("{note_ids}", note_ids[:3000])
+    prompt = INGEST_PROMPT.replace("{note_ids}", note_ids[:3000]).replace("{today}", today)
     user_msg = f"FONTE: {source_name}\n\nCONTEÚDO:\n{raw_text[:8000]}"
 
     messages = [
@@ -416,14 +419,19 @@ TOOL_FNS = {
     "create_note":  lambda args: tool_create_note(**args),
 }
 
-SYSTEM_PROMPT = """Você é o Knowledge Graph Agent do Obsidian. Sua única função é construir, enriquecer e manter a rede de conhecimento do vault.
+SYSTEM_PROMPT = """Você é o Mordomo do Conhecimento — um agente autônomo que organiza, conecta e enriquece o vault Obsidian do usuário.
 
-IDENTIDADE:
-- Você conecta ideias, pessoas, projetos e fontes através de wiki links
-- Você enriquece notas com contexto, referências cruzadas e correlações
-- Você organiza o conhecimento para que seja navegável e útil
+MISSÃO:
+Transformar informações brutas em conhecimento navegável. Você decide a estrutura de pastas, cria notas, estabelece conexões e mantém o vault sempre organizado e coerente. Você age como um mordomo inteligente: antecipa necessidades, organiza sem pedir permissão, e executa tarefas até o fim.
 
-FORMATO OBRIGATÓRIO:
+ESTRUTURA DE PASTAS — LIVRE:
+- Você pode criar qualquer pasta e subpasta que faça sentido para o contexto
+- Exemplos válidos: "clientes/acme/projetos/", "mercado/latam/analises/", "pessoas/equipe/", "produtos/roadmap/"
+- Prefira hierarquias semânticas ao invés de números: "projetos/nome-do-projeto/" ao invés de "01-projetos/"
+- Crie pastas temáticas conforme o conteúdo cresce
+- Use slugs em lowercase com hifens, sem acentos: "reuniao-kick-off.md"
+
+FORMATO OBRIGATÓRIO — SEM EXCEÇÃO:
 - Responda SEMPRE com exatamente um objeto JSON por mensagem
 - NUNCA misture texto com JSON
 - NUNCA escreva explicações fora do JSON
@@ -433,24 +441,23 @@ FORMATO OBRIGATÓRIO:
 {"tool": "read_note", "args": {"note_id": "caminho/nota.md"}}
 {"tool": "list_notes", "args": {}}
 {"tool": "edit_note", "args": {"note_id": "caminho/nota.md", "content": "conteúdo markdown completo"}}
-{"tool": "create_note", "args": {"path": "caminho/nota.md", "content": "conteúdo markdown completo"}}
-{"tool": "done", "args": {"answer": "resumo do que foi feito"}}
+{"tool": "create_note", "args": {"path": "pasta/subpasta/nota.md", "content": "conteúdo markdown completo"}}
+{"tool": "done", "args": {"answer": "resumo completo do que foi feito"}}
 
 REGRAS DE KNOWLEDGE GRAPH:
 - Wiki links SEMPRE com alias: [[caminho/nota|Nome Visível]]
-- Exemplo correto: [[05-fontes/Nielsen|Nielsen]]
-- Exemplo errado: [[05-fontes/Nielsen]] ou [[Nielsen]]
+- Exemplo correto: [[clientes/acme/perfil|ACME]]
+- Exemplo errado: [[clientes/acme/perfil]] ou [[ACME]]
 - Preserve frontmatter YAML ao editar notas
-- Adicione links onde houver correlação real, não forçada
-- Use search_vault (ChromaDB) para encontrar notas semanticamente relacionadas antes de criar links
-- Ao terminar uma tarefa longa, resuma TODAS as notas modificadas no "done"
+- Adicione links onde houver correlação real — pessoas, projetos, temas, empresas
+- Use search_vault (ChromaDB) para descobrir correlações antes de criar links
+- Frontmatter mínimo: title, date, tags
 
-FLUXO PARA REVISÃO DE VAULT:
-1. list_notes → obter todos os IDs
-2. Para cada nota: read_note → identificar menções implícitas → search_vault para confirmar correlações → edit_note com links adicionados
-3. done com resumo completo
-
-NUNCA pare no meio. Complete a tarefa inteira antes de chamar "done"."""
+COMPORTAMENTO:
+- Execute a tarefa completa sem parar no meio
+- Se uma subtarefa falhar, continue com as próximas
+- Ao criar uma nota, sempre busque (search_vault) notas relacionadas para adicionar wiki links
+- No "done", liste todas as notas criadas/editadas com uma linha de descrição cada"""
 
 
 def _call_llm_raw(messages: list) -> str:
@@ -480,7 +487,8 @@ def ask(question: str, collections: list | None = None) -> dict:
     ]
     sources = []
 
-    for _ in range(20):
+    bad_format_streak = 0
+    while True:
         raw = _call_llm_raw(messages)
         messages.append({"role": "assistant", "content": raw})
         log.info(f"LLM: {raw[:200]}")
@@ -502,9 +510,13 @@ def ask(question: str, collections: list | None = None) -> dict:
                     continue
 
         if call is None:
+            bad_format_streak += 1
+            if bad_format_streak >= 5:
+                return {"answer": "Agente travou em loop de formato inválido após 5 tentativas consecutivas.", "sources": list(set(sources))}
             messages.append({"role": "user", "content": "Responda APENAS com um JSON válido. Nenhum texto antes ou depois."})
             continue
 
+        bad_format_streak = 0
         tool = call.get("tool")
         args = call.get("args", {})
 
@@ -522,8 +534,6 @@ def ask(question: str, collections: list | None = None) -> dict:
             sources.append(args.get("note_id") or args.get("path", ""))
 
         messages.append({"role": "user", "content": f"Resultado de {tool}:\n{result}"})
-
-    return {"answer": "Limite de iterações atingido.", "sources": list(set(sources))}
 
 
 # ── Ações rápidas (mantidas para compatibilidade) ─────────────────────────────
