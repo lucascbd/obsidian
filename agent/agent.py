@@ -262,66 +262,84 @@ TOOL_FNS = {
 SYSTEM_PROMPT = """Você é um agente de gestão de conhecimento integrado ao Obsidian via CouchDB.
 Você pode LER e ESCREVER notas diretamente no vault do usuário.
 
+Ferramentas disponíveis (responda APENAS com JSON quando quiser usar uma):
+
+{"tool": "search_vault", "args": {"query": "texto para buscar", "collections": ["opcional"]}}
+{"tool": "read_note", "args": {"note_id": "caminho/da/nota.md"}}
+{"tool": "list_notes", "args": {}}
+{"tool": "edit_note", "args": {"note_id": "caminho/da/nota.md", "content": "conteúdo completo"}}
+{"tool": "create_note", "args": {"path": "pasta/nome.md", "content": "conteúdo"}}
+{"tool": "done", "args": {"answer": "resposta final para o usuário"}}
+
 Regras:
-- Sempre use search_vault ou list_notes para encontrar notas antes de agir
-- Sempre leia a nota completa com read_note antes de editá-la
-- Ao editar, preserve frontmatter e estrutura existente
+- Responda SOMENTE com um JSON por vez (sem texto antes ou depois)
+- Sempre use search_vault ou list_notes antes de agir
+- Leia a nota com read_note antes de editar
 - Wiki links devem ter alias: [[caminho/nota|Nome Visível]]
-- Responda em português brasileiro
-- Relate o que fez ao terminar (quais notas foram modificadas)"""
+- Preserve frontmatter ao editar notas
+- Termine sempre com {"tool": "done", "args": {"answer": "..."}} relatando o que foi feito
+- Responda em português brasileiro"""
 
 
-def ask(question: str, collections: list | None = None) -> dict:
-    """Loop de tool calling: o LLM age no vault até completar a tarefa."""
-    messages = [
-        {"role": "system",  "content": SYSTEM_PROMPT},
-        {"role": "user",    "content": question},
-    ]
+def _call_llm_raw(messages: list) -> str:
     headers = {
         "Authorization": f"Bearer {OPENROUTER_KEY}",
         "Content-Type":  "application/json",
         "HTTP-Referer":  "https://obsidian-agent.local",
         "X-Title":       "Obsidian MI Agent",
     }
+    payload = {
+        "model":       OPENROUTER_MODEL,
+        "messages":    messages,
+        "temperature": 0.2,
+    }
+    r = requests.post(OPENROUTER_URL, json=payload, headers=headers, timeout=120)
+    if not r.ok:
+        log.error(f"OpenRouter error {r.status_code}: {r.text}")
+    r.raise_for_status()
+    return r.json()["choices"][0]["message"]["content"].strip()
+
+
+def ask(question: str, collections: list | None = None) -> dict:
+    """Loop de tool calling via prompt até o agente chamar 'done'."""
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user",   "content": question},
+    ]
     sources = []
 
-    for _ in range(10):  # máximo 10 rounds de tool calls
-        payload = {
-            "model":       OPENROUTER_MODEL,
-            "messages":    messages,
-            "tools":       TOOLS,
-            "tool_choice": "auto",
-            "temperature": 0.3,
-        }
-        r = requests.post(OPENROUTER_URL, json=payload, headers=headers, timeout=120)
-        if not r.ok:
-            log.error(f"OpenRouter error {r.status_code}: {r.text}")
-        r.raise_for_status()
-        response = r.json()
-        msg = response["choices"][0]["message"]
-        messages.append(msg)
+    for _ in range(20):
+        raw = _call_llm_raw(messages)
+        messages.append({"role": "assistant", "content": raw})
+        log.info(f"LLM: {raw[:200]}")
 
-        tool_calls = msg.get("tool_calls") or []
-        if not tool_calls:
-            return {"answer": msg.get("content", ""), "sources": list(set(sources))}
+        # Extrai JSON da resposta
+        try:
+            # Remove blocos de código markdown se existirem
+            clean = re.sub(r"```(?:json)?\n?(.*?)```", r"\1", raw, flags=re.DOTALL).strip()
+            call  = json.loads(clean)
+        except Exception:
+            # Resposta não é JSON — trata como resposta final
+            return {"answer": raw, "sources": list(set(sources))}
 
-        for tc in tool_calls:
-            fn_name = tc["function"]["name"]
-            fn_args = json.loads(tc["function"]["arguments"])
-            log.info(f"Tool call: {fn_name}({fn_args})")
+        tool = call.get("tool")
+        args = call.get("args", {})
 
-            result = TOOL_FNS[fn_name](fn_args)
+        if tool == "done":
+            return {"answer": args.get("answer", "Concluído."), "sources": list(set(sources))}
 
-            if fn_name in ("edit_note", "create_note"):
-                sources.append(fn_args.get("note_id") or fn_args.get("path", ""))
+        if tool not in TOOL_FNS:
+            return {"answer": f"Ferramenta desconhecida: {tool}", "sources": list(set(sources))}
 
-            messages.append({
-                "role":         "tool",
-                "tool_call_id": tc["id"],
-                "content":      result,
-            })
+        result = TOOL_FNS[tool](args)
+        log.info(f"Tool {tool} result: {str(result)[:200]}")
 
-    return {"answer": "Tarefa concluída.", "sources": list(set(sources))}
+        if tool in ("edit_note", "create_note"):
+            sources.append(args.get("note_id") or args.get("path", ""))
+
+        messages.append({"role": "user", "content": f"Resultado de {tool}:\n{result}"})
+
+    return {"answer": "Limite de iterações atingido.", "sources": list(set(sources))}
 
 
 # ── Ações rápidas (mantidas para compatibilidade) ─────────────────────────────
