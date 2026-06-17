@@ -38,7 +38,7 @@ services:
       - |
         B="http://couchdb:5984/_node/_local/_config"
         curl -sf -u "$COUCHDB_USER:$COUCHDB_PASSWORD" -X PUT -H "Content-Type: application/json" "$$B/chttpd_auth/require_valid_user" -d '"false"' && echo "OK require_valid_user" || echo "FAIL require_valid_user"
-        curl -sf -u "$COUCHDB_USER:$COUCHDB_PASSWORD" -X PUT -H "Content-Type: application/json" "$$B/httpd/WWW-Authenticate" -d '"Basic realm=\\"administrator\\""' && echo "OK WWW-Auth" || echo "FAIL WWW-Auth"
+        curl -sf -u "$COUCHDB_USER:$COUCHDB_PASSWORD" -X PUT -H "Content-Type: application/json" "$$B/httpd/WWW-Authenticate" -d '"Basic realm=\"administrator\""' && echo "OK WWW-Auth" || echo "FAIL WWW-Auth"
         curl -sf -u "$COUCHDB_USER:$COUCHDB_PASSWORD" -X PUT -H "Content-Type: application/json" "$$B/httpd/enable_cors" -d '"true"' && echo "OK enable_cors" || echo "FAIL enable_cors"
         curl -sf -u "$COUCHDB_USER:$COUCHDB_PASSWORD" -X PUT -H "Content-Type: application/json" "$$B/chttpd/max_http_request_size" -d '"4294967296"' && echo "OK max_http" || echo "FAIL max_http"
         curl -sf -u "$COUCHDB_USER:$COUCHDB_PASSWORD" -X PUT -H "Content-Type: application/json" "$$B/couchdb/max_document_size" -d '"50000000"' && echo "OK max_doc" || echo "FAIL max_doc"
