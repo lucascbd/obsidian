@@ -3,9 +3,6 @@ name: Build and push images
 on:
   push:
     branches: [main, feature/agent-improvements]
-    paths:
-      - "agent/**"
-      - "watcher/**"
 
 env:
   REGISTRY: ghcr.io
