@@ -132,8 +132,31 @@ def repair_vault() -> dict:
         "sources": fixed,
     }
 
-def tool_search_vault(query: str, collections: list | None = None) -> str:
-    """Busca semântica no vault via ChromaDB."""
+def get_root_folders() -> list:
+    """Retorna as pastas raiz do vault (primeiro segmento de path das notas ativas)."""
+    try:
+        r = requests.get(
+            f"{COUCHDB_URL}/{COUCHDB_DB}/_all_docs",
+            params={"include_docs": False},
+            auth=COUCHDB_AUTH, timeout=15,
+        )
+        r.raise_for_status()
+        roots = set()
+        for row in r.json().get("rows", []):
+            nid = row["id"]
+            if nid.startswith("_") or nid.startswith("h:"):
+                continue
+            parts = nid.split("/")
+            if len(parts) > 1:
+                roots.add(parts[0])
+        return sorted(roots)
+    except Exception as e:
+        log.error(f"Erro ao listar raízes: {e}")
+        return []
+
+
+def tool_search_vault(query: str, collections: list | None = None, root: str | None = None) -> str:
+    """Busca semântica no vault via ChromaDB, opcionalmente filtrada por pasta raiz."""
     cols  = collections or COLLECTIONS
     model = get_embed_model()
     chroma = get_chroma()
@@ -142,10 +165,13 @@ def tool_search_vault(query: str, collections: list | None = None) -> str:
     for col_name in cols:
         try:
             col = chroma.get_collection(col_name)
-            r   = col.query(query_embeddings=[embedding], n_results=5)
+            r   = col.query(query_embeddings=[embedding], n_results=10)
             for doc, meta, dist in zip(r["documents"][0], r["metadatas"][0], r["distances"][0]):
+                nid = meta["note_id"]
+                if root and not nid.startswith(root + "/"):
+                    continue
                 results.append({
-                    "note_id": meta["note_id"],
+                    "note_id": nid,
                     "score":   round(1 - dist, 3),
                     "excerpt": doc[:400],
                 })
@@ -179,8 +205,8 @@ def tool_edit_note(note_id: str, content: str) -> str:
         return f"Erro ao editar nota '{note_id}': {e}"
 
 
-def tool_list_notes() -> str:
-    """Lista todas as notas ativas (não deletadas) do vault."""
+def tool_list_notes(root: str | None = None) -> str:
+    """Lista todas as notas ativas (não deletadas) do vault, opcionalmente filtradas por pasta raiz."""
     try:
         r = requests.get(
             f"{COUCHDB_URL}/{COUCHDB_DB}/_all_docs",
@@ -193,6 +219,7 @@ def tool_list_notes() -> str:
             if not row["id"].startswith("_")
             and not row["id"].startswith("h:")
             and not row.get("doc", {}).get("deleted")
+            and (not root or row["id"].startswith(root + "/"))
         ]
         return json.dumps(ids, ensure_ascii=False)
     except Exception as e:
@@ -285,13 +312,19 @@ Responda APENAS com um JSON no formato:
 {{"path": "pasta/subpasta/nome.md", "content": "conteúdo completo da nota", "summary": "1-2 frases descrevendo o que foi criado"}}"""
 
 
-def ingest(raw_text: str, source_name: str) -> dict:
+def ingest(raw_text: str, source_name: str, root: str | None = None) -> dict:
     """Converte texto bruto em nota Obsidian e salva no vault."""
     import datetime
-    note_ids = tool_list_notes()
+    note_ids = tool_list_notes(root=root)
     today = datetime.date.today().isoformat()
 
-    prompt = INGEST_PROMPT.replace("{note_ids}", note_ids[:3000]).replace("{today}", today)
+    root_instruction = (
+        f"\nESCOPO: A nota DEVE ser criada dentro de '{root}/'. "
+        f"O path deve começar com '{root}/'. "
+        f"NUNCA crie wiki links para notas fora de '{root}/'."
+    ) if root else ""
+
+    prompt = (INGEST_PROMPT + root_instruction).replace("{note_ids}", note_ids[:3000]).replace("{today}", today)
     user_msg = f"FONTE: {source_name}\n\nCONTEÚDO:\n{raw_text[:8000]}"
 
     messages = [
@@ -320,10 +353,13 @@ def ingest(raw_text: str, source_name: str) -> dict:
         content = data.get("content", raw_text[:4000])
         summary = data.get("summary", f"Nota criada a partir de {source_name}")
 
+        # Garante que o path respeita o root
+        if root and not path.startswith(root + "/"):
+            path = f"{root}/{path}"
+
         result = tool_create_note(path, content)
         log.info(f"Ingest: {result}")
 
-        # Dispara busca de correlações e adiciona links em segundo plano (via ask)
         return {
             "answer":  f"{summary}\n\nNota criada: `{path}`\n\n{result}",
             "sources": [path],
@@ -333,17 +369,54 @@ def ingest(raw_text: str, source_name: str) -> dict:
     return {"answer": "Falha ao processar o conteúdo após 3 tentativas.", "sources": []}
 
 
-def ingest_file(filename: str, content: bytes) -> dict:
+def ingest_file(filename: str, content: bytes, root: str | None = None) -> dict:
     raw_text = _extract_text_from_file(filename, content)
-    return ingest(raw_text, source_name=filename)
+    return ingest(raw_text, source_name=filename, root=root)
 
 
-def ingest_url(url: str) -> dict:
+def ingest_url(url: str, root: str | None = None) -> dict:
     try:
         raw_text = _extract_text_from_url(url)
     except Exception as e:
         return {"answer": f"Erro ao buscar URL: {e}", "sources": []}
-    return ingest(raw_text, source_name=url)
+    return ingest(raw_text, source_name=url, root=root)
+
+
+def ingest_zip(content: bytes, root: str | None = None) -> dict:
+    """Extrai um ZIP e ingere cada arquivo suportado como nota Obsidian."""
+    import zipfile
+    SUPPORTED = {"txt", "md", "html", "htm", "pdf", "docx"}
+    created, errors = [], []
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as zf:
+            names = [n for n in zf.namelist() if not n.endswith("/")]
+            # Filtra apenas arquivos suportados
+            names = [n for n in names if (n.rsplit(".", 1)[-1].lower() if "." in n else "") in SUPPORTED]
+            log.info(f"ZIP: {len(names)} arquivos suportados para ingestão")
+            for name in names:
+                try:
+                    file_bytes = zf.read(name)
+                    basename   = os.path.basename(name)
+                    result     = ingest_file(basename, file_bytes, root=root)
+                    created.append(result.get("path", basename))
+                    log.info(f"ZIP ingest OK: {result.get('path')}")
+                except Exception as e:
+                    errors.append(f"{name}: {e}")
+                    log.error(f"ZIP ingest erro {name}: {e}")
+    except zipfile.BadZipFile:
+        return {"answer": "Arquivo ZIP inválido ou corrompido.", "sources": []}
+
+    lines = [f"**{len(created)} notas criadas** de {len(names)} arquivos no ZIP"]
+    if root:
+        lines.append(f"Escopo: `{root}/`")
+    lines.append("")
+    lines.extend(f"- `{p}`" for p in created)
+    if errors:
+        lines.append(f"\n**{len(errors)} erros:**")
+        lines.extend(f"- {e}" for e in errors)
+
+    return {"answer": "\n".join(lines), "sources": created}
 
 
 # ── Tool calling loop ─────────────────────────────────────────────────────────
@@ -486,13 +559,55 @@ def _call_llm_raw(messages: list) -> str:
     return r.json()["choices"][0]["message"]["content"].strip()
 
 
-def ask(question: str, collections: list | None = None) -> dict:
+def ask(question: str, collections: list | None = None, root: str | None = None) -> dict:
     """Loop de tool calling via prompt até o agente chamar 'done'."""
+    root_ctx = (
+        f"\n\nESCOPO ATIVO: '{root}/'\n"
+        f"- Todas as notas criadas DEVEM começar com '{root}/'\n"
+        f"- list_notes e search_vault já retornam apenas notas de '{root}/'\n"
+        f"- NUNCA crie wiki links apontando para fora de '{root}/'\n"
+        f"- Ao criar uma nota, se o path não começar com '{root}/', adicione automaticamente"
+    ) if root else ""
+
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": SYSTEM_PROMPT + root_ctx},
         {"role": "user",   "content": question},
     ]
     sources = []
+
+    # Ferramentas com escopo de root aplicado
+    def _scoped_search(args):
+        return tool_search_vault(root=root, **args)
+
+    def _scoped_list(_args):
+        return tool_list_notes(root=root)
+
+    def _scoped_read(args):
+        nid = args.get("note_id", "")
+        if root and not nid.startswith(root + "/"):
+            return f"Bloqueado: nota '{nid}' está fora do escopo '{root}/'."
+        return tool_read_note(**args)
+
+    def _scoped_edit(args):
+        nid = args.get("note_id", "")
+        if root and not nid.startswith(root + "/"):
+            return f"Bloqueado: nota '{nid}' está fora do escopo '{root}/'."
+        return tool_edit_note(**args)
+
+    def _scoped_create(args):
+        if root:
+            path = args.get("path", "")
+            if not path.startswith(root + "/"):
+                args = {**args, "path": f"{root}/{path}"}
+        return tool_create_note(**args)
+
+    scoped_fns = {
+        "search_vault": _scoped_search,
+        "read_note":    _scoped_read,
+        "list_notes":   _scoped_list,
+        "edit_note":    _scoped_edit,
+        "create_note":  _scoped_create,
+    }
 
     bad_format_streak = 0
     while True:
@@ -500,7 +615,6 @@ def ask(question: str, collections: list | None = None) -> dict:
         messages.append({"role": "assistant", "content": raw})
         log.info(f"LLM: {raw[:200]}")
 
-        # Extrai JSON da resposta — ignora qualquer texto ao redor
         call = None
         clean = re.sub(r"```(?:json)?\n?(.*?)```", r"\1", raw, flags=re.DOTALL).strip()
 
@@ -530,11 +644,11 @@ def ask(question: str, collections: list | None = None) -> dict:
         if tool == "done":
             return {"answer": args.get("answer", "Concluído."), "sources": list(set(sources))}
 
-        if tool not in TOOL_FNS:
+        if tool not in scoped_fns:
             messages.append({"role": "user", "content": f"Ferramenta '{tool}' não existe. Use: search_vault, read_note, list_notes, edit_note, create_note, done."})
             continue
 
-        result = TOOL_FNS[tool](args)
+        result = scoped_fns[tool](args)
         log.info(f"Tool {tool} result: {str(result)[:200]}")
 
         if tool in ("edit_note", "create_note"):
@@ -544,21 +658,22 @@ def ask(question: str, collections: list | None = None) -> dict:
 
 
 # ── Ações rápidas (mantidas para compatibilidade) ─────────────────────────────
-def weekly_summary() -> dict:
-    return ask("Gere um resumo executivo semanal com: projetos em andamento e status, riscos e bloqueios, próximos passos prioritários, stakeholders que precisam de atenção.")
+def weekly_summary(root: str | None = None) -> dict:
+    return ask("Gere um resumo executivo semanal com: projetos em andamento e status, riscos e bloqueios, próximos passos prioritários, stakeholders que precisam de atenção.", root=root)
 
 
-def market_insights() -> dict:
-    return ask("Com base nas análises e estudos registrados, identifique: principais tendências de mercado, oportunidades, riscos competitivos e gaps de conhecimento.")
+def market_insights(root: str | None = None) -> dict:
+    return ask("Com base nas análises e estudos registrados, identifique: principais tendências de mercado, oportunidades, riscos competitivos e gaps de conhecimento.", root=root)
 
 
-def summarize_meeting(note_id: str) -> dict:
-    return ask(f"Leia a nota {note_id} e gere: resumo executivo, decisões tomadas, action items com responsável e prazo, pontos que precisam de follow-up.")
+def summarize_meeting(note_id: str, root: str | None = None) -> dict:
+    return ask(f"Leia a nota {note_id} e gere: resumo executivo, decisões tomadas, action items com responsável e prazo, pontos que precisam de follow-up.", root=root)
 
 
-def vault_review() -> dict:
+def vault_review(root: str | None = None) -> dict:
     return ask(
         "Liste todas as notas do vault. Para cada nota que tiver wiki links no formato [[caminho/Nota]] sem alias, "
         "leia a nota e corrija para [[caminho/Nota|Nota]]. Também identifique correlações óbvias entre notas e adicione links onde pertinente. "
-        "Reporte quais notas foram modificadas."
+        "Reporte quais notas foram modificadas.",
+        root=root,
     )

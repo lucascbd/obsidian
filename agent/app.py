@@ -6,7 +6,7 @@ import os
 import logging
 from flask import Flask, request, jsonify, render_template_string
 from flask_cors import CORS
-from agent import ask, weekly_summary, market_insights, summarize_meeting, vault_review, repair_vault, ingest_file, ingest_url
+from agent import ask, weekly_summary, market_insights, summarize_meeting, vault_review, repair_vault, ingest_file, ingest_url, ingest_zip, get_root_folders
 
 logging.basicConfig(
     level=logging.INFO,
@@ -156,11 +156,17 @@ HTML = """<!DOCTYPE html>
 </head>
 <body>
 <div class="drop-overlay" id="drop-overlay">📄 Solte o arquivo para importar</div>
-<input type="file" id="file-input" style="display:none" accept=".pdf,.docx,.txt,.md,.html,.htm,.csv">
+<input type="file" id="file-input" style="display:none" accept=".pdf,.docx,.txt,.md,.html,.htm,.csv,.zip">
 
 <header>
-  <h1>🧠 Obsidian MI Agent</h1>
-  <span>INSIGHTS & ANALYTICS LATAM</span>
+  <h1>🧠 Obsidian Agent</h1>
+  <div style="display:flex;align-items:center;gap:12px">
+    <label style="font-size:11px;color:var(--muted);font-family:'JetBrains Mono',monospace">ESCOPO</label>
+    <select id="root-select" class="col-filter" onchange="onRootChange()" style="min-width:140px;font-size:13px">
+      <option value="">🌐 Todo o vault</option>
+    </select>
+    <span id="root-badge" style="font-size:10px;color:var(--muted);font-family:'JetBrains Mono',monospace"></span>
+  </div>
 </header>
 
 <div class="layout">
@@ -209,6 +215,31 @@ HTML = """<!DOCTYPE html>
 
 <script>
   let activeFilter = null;
+  let activeRoot   = null;
+
+  // ── Root selector ─────────────────────────────────────────────────────────
+  async function loadRoots() {
+    try {
+      const r = await fetch('/api/roots');
+      const data = await r.json();
+      const sel = document.getElementById('root-select');
+      data.roots.forEach(root => {
+        const opt = document.createElement('option');
+        opt.value = root;
+        opt.textContent = '📁 ' + root;
+        sel.appendChild(opt);
+      });
+    } catch(e) { console.warn('Erro ao carregar raízes', e); }
+  }
+
+  function onRootChange() {
+    const sel = document.getElementById('root-select');
+    activeRoot = sel.value || null;
+    const badge = document.getElementById('root-badge');
+    badge.textContent = activeRoot ? `isolado em "${activeRoot}"` : '';
+  }
+
+  function getRoot() { return activeRoot; }
 
   function setFilter(col, el) {
     activeFilter = col;
@@ -286,6 +317,7 @@ HTML = """<!DOCTYPE html>
     try {
       const body = { question: q };
       if (col) body.collections = [col];
+      if (getRoot()) body.root = getRoot();
 
       const r = await fetch('/api/ask', {
         method: 'POST',
@@ -303,6 +335,8 @@ HTML = """<!DOCTYPE html>
     document.getElementById('send-btn').disabled = false;
     input.focus();
   }
+
+  loadRoots();
 
   // ── Upload ────────────────────────────────────────────────────────────────
   document.getElementById('file-input').addEventListener('change', async e => {
@@ -322,11 +356,13 @@ HTML = """<!DOCTYPE html>
   });
 
   async function uploadFile(file) {
-    appendMsg('user', `📄 Importando: ${file.name}`);
+    const isZip = file.name.toLowerCase().endsWith('.zip');
+    appendMsg('user', `${isZip ? '🗜' : '📄'} Importando: ${file.name}${getRoot() ? ` → ${getRoot()}/` : ''}`);
     appendTyping();
     document.getElementById('send-btn').disabled = true;
     const form = new FormData();
     form.append('file', file);
+    if (getRoot()) form.append('root', getRoot());
     try {
       const r = await fetch('/api/upload', { method: 'POST', body: form });
       const data = await r.json();
@@ -342,14 +378,14 @@ HTML = """<!DOCTYPE html>
   async function promptURL() {
     const url = prompt('Cole a URL do artigo ou página:');
     if (!url || !url.startsWith('http')) return;
-    appendMsg('user', `🔗 Importando URL: ${url}`);
+    appendMsg('user', `🔗 Importando URL: ${url}${getRoot() ? ` → ${getRoot()}/` : ''}`);
     appendTyping();
     document.getElementById('send-btn').disabled = true;
     try {
       const r = await fetch('/api/upload-url', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url })
+        body: JSON.stringify({ url, root: getRoot() })
       });
       const data = await r.json();
       removeTyping();
@@ -364,11 +400,16 @@ HTML = """<!DOCTYPE html>
   async function runAction(action) {
     document.getElementById('send-btn').disabled = true;
     const labels = { weekly: '📅 Resumo semanal', insights: '💡 Insights de mercado', 'vault-review': '🔗 Revisar vault' };
-    appendMsg('user', labels[action]);
+    const rootLabel = getRoot() ? ` (${getRoot()})` : '';
+    appendMsg('user', labels[action] + rootLabel);
     appendTyping();
 
     try {
-      const r = await fetch(`/api/${action}`, { method: 'POST' });
+      const r = await fetch(`/api/${action}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ root: getRoot() }),
+      });
       const data = await r.json();
       removeTyping();
       appendMsg('agent', data.answer, data.sources);
@@ -389,30 +430,39 @@ def index():
     return render_template_string(HTML)
 
 
+@app.route("/api/roots", methods=["GET"])
+def api_roots():
+    return jsonify({"roots": get_root_folders()})
+
+
 @app.route("/api/ask", methods=["POST"])
 def api_ask():
     data        = request.get_json()
     question    = data.get("question", "").strip()
-    collections = data.get("collections")  # None = todas
+    collections = data.get("collections")
+    root        = data.get("root") or None
     if not question:
         return jsonify({"error": "question obrigatório"}), 400
-    result = ask(question, collections)
+    result = ask(question, collections, root=root)
     return jsonify(result)
 
 
 @app.route("/api/weekly", methods=["POST"])
 def api_weekly():
-    return jsonify(weekly_summary())
+    data = request.get_json(silent=True) or {}
+    return jsonify(weekly_summary(root=data.get("root") or None))
 
 
 @app.route("/api/insights", methods=["POST"])
 def api_insights():
-    return jsonify(market_insights())
+    data = request.get_json(silent=True) or {}
+    return jsonify(market_insights(root=data.get("root") or None))
 
 
 @app.route("/api/vault-review", methods=["POST"])
 def api_vault_review():
-    return jsonify(vault_review())
+    data = request.get_json(silent=True) or {}
+    return jsonify(vault_review(root=data.get("root") or None))
 
 
 @app.route("/api/repair", methods=["POST"])
@@ -424,30 +474,34 @@ def api_repair():
 def api_meeting():
     data    = request.get_json()
     note_id = data.get("note_id", "").strip()
+    root    = data.get("root") or None
     if not note_id:
         return jsonify({"error": "note_id obrigatório"}), 400
-    return jsonify(summarize_meeting(note_id))
+    return jsonify(summarize_meeting(note_id, root=root))
 
 
 @app.route("/api/upload", methods=["POST"])
 def api_upload():
     if "file" not in request.files:
         return jsonify({"error": "arquivo obrigatório"}), 400
-    f = request.files["file"]
+    f    = request.files["file"]
+    root = request.form.get("root") or None
     content = f.read()
     if not content:
         return jsonify({"error": "arquivo vazio"}), 400
-    result = ingest_file(f.filename, content)
-    return jsonify(result)
+    if f.filename.lower().endswith(".zip"):
+        return jsonify(ingest_zip(content, root=root))
+    return jsonify(ingest_file(f.filename, content, root=root))
 
 
 @app.route("/api/upload-url", methods=["POST"])
 def api_upload_url():
     data = request.get_json()
     url  = (data or {}).get("url", "").strip()
+    root = (data or {}).get("root") or None
     if not url:
         return jsonify({"error": "url obrigatória"}), 400
-    result = ingest_url(url)
+    result = ingest_url(url, root=root)
     return jsonify(result)
 
 
