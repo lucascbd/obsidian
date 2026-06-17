@@ -349,14 +349,25 @@ def ask(question: str, collections: list | None = None) -> dict:
         messages.append({"role": "assistant", "content": raw})
         log.info(f"LLM: {raw[:200]}")
 
-        # Extrai JSON da resposta
+        # Tenta extrair o primeiro JSON válido da resposta
+        call = None
+        # Remove blocos de código markdown
+        clean = re.sub(r"```(?:json)?\n?(.*?)```", r"\1", raw, flags=re.DOTALL).strip()
+        # Tenta parsear a resposta inteira
         try:
-            # Remove blocos de código markdown se existirem
-            clean = re.sub(r"```(?:json)?\n?(.*?)```", r"\1", raw, flags=re.DOTALL).strip()
-            call  = json.loads(clean)
+            call = json.loads(clean)
         except Exception:
-            # Resposta não é JSON — trata como resposta final
-            return {"answer": raw, "sources": list(set(sources))}
+            # Tenta encontrar o primeiro objeto JSON na resposta
+            for match in re.finditer(r'\{[^{}]*"tool"[^{}]*\}', clean, re.DOTALL):
+                try:
+                    call = json.loads(match.group())
+                    break
+                except Exception:
+                    continue
+
+        if call is None:
+            # Sem JSON válido — resposta final em texto
+            return {"answer": clean, "sources": list(set(sources))}
 
         tool = call.get("tool")
         args = call.get("args", {})
@@ -365,7 +376,8 @@ def ask(question: str, collections: list | None = None) -> dict:
             return {"answer": args.get("answer", "Concluído."), "sources": list(set(sources))}
 
         if tool not in TOOL_FNS:
-            return {"answer": f"Ferramenta desconhecida: {tool}", "sources": list(set(sources))}
+            # Ferramenta desconhecida — trata como resposta final
+            return {"answer": args.get("answer", clean), "sources": list(set(sources))}
 
         result = TOOL_FNS[tool](args)
         log.info(f"Tool {tool} result: {str(result)[:200]}")
