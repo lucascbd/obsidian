@@ -87,9 +87,9 @@ def _write_note_content(doc: dict, new_content: str) -> bool:
         leaf["data"] = chunk
         _couch("put", leaf["_id"], json=leaf)
 
-    # Atualiza size e mtime no documento pai para evitar erro de validação do LiveSync
+    # Atualiza size (em bytes, como o LiveSync espera) e mtime no documento pai
     import time
-    doc["size"] = len(new_content)
+    doc["size"] = len(new_content.encode("utf-8"))
     doc["mtime"] = int(time.time() * 1000)
     _couch("put", doc["_id"], json=doc)
     return True

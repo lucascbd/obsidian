@@ -50,6 +50,7 @@ services:
         curl -sf -X PUT $$AUTH "$$BASE/_node/_local/_config/cors/headers" -d '"accept, authorization, content-type, origin, referer"'
         curl -sf -X PUT $$AUTH "$$BASE/$${COUCHDB_DB}" || true
         echo "CouchDB configurado com sucesso."
+        exit 0
 
   chromadb:
     image: chromadb/chroma:latest
