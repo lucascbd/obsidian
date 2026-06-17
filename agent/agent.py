@@ -294,6 +294,8 @@ def ask(question: str, collections: list | None = None) -> dict:
             "temperature": 0.3,
         }
         r = requests.post(OPENROUTER_URL, json=payload, headers=headers, timeout=120)
+        if not r.ok:
+            log.error(f"OpenRouter error {r.status_code}: {r.text}")
         r.raise_for_status()
         response = r.json()
         msg = response["choices"][0]["message"]
