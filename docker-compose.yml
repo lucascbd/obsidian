@@ -40,10 +40,7 @@ services:
       - obsidian-net
 
   watcher:
-    build:
-      context: ./watcher
-      dockerfile: Dockerfile
-    image: obsidian-watcher
+    image: ghcr.io/lucascbd/obsidian-watcher:latest
     container_name: obsidian-watcher
     restart: unless-stopped
     environment:
@@ -62,10 +59,7 @@ services:
       - obsidian-net
 
   agent:
-    build:
-      context: ./agent
-      dockerfile: Dockerfile
-    image: obsidian-agent
+    image: ghcr.io/lucascbd/obsidian-agent:latest
     container_name: obsidian-agent
     restart: unless-stopped
     ports:
