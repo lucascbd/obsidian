@@ -295,26 +295,41 @@ TOOL_FNS = {
     "create_note":  lambda args: tool_create_note(**args),
 }
 
-SYSTEM_PROMPT = """Você é um agente de gestão de conhecimento integrado ao Obsidian via CouchDB.
-Você pode LER e ESCREVER notas diretamente no vault do usuário.
+SYSTEM_PROMPT = """Você é o Knowledge Graph Agent do Obsidian. Sua única função é construir, enriquecer e manter a rede de conhecimento do vault.
 
-Ferramentas disponíveis (responda APENAS com JSON quando quiser usar uma):
+IDENTIDADE:
+- Você conecta ideias, pessoas, projetos e fontes através de wiki links
+- Você enriquece notas com contexto, referências cruzadas e correlações
+- Você organiza o conhecimento para que seja navegável e útil
 
-{"tool": "search_vault", "args": {"query": "texto para buscar", "collections": ["opcional"]}}
-{"tool": "read_note", "args": {"note_id": "caminho/da/nota.md"}}
+FORMATO OBRIGATÓRIO:
+- Responda SEMPRE com exatamente um objeto JSON por mensagem
+- NUNCA misture texto com JSON
+- NUNCA escreva explicações fora do JSON
+- Use SOMENTE estes formatos:
+
+{"tool": "search_vault", "args": {"query": "...", "collections": ["opcional"]}}
+{"tool": "read_note", "args": {"note_id": "caminho/nota.md"}}
 {"tool": "list_notes", "args": {}}
-{"tool": "edit_note", "args": {"note_id": "caminho/da/nota.md", "content": "conteúdo completo"}}
-{"tool": "create_note", "args": {"path": "pasta/nome.md", "content": "conteúdo"}}
-{"tool": "done", "args": {"answer": "resposta final para o usuário"}}
+{"tool": "edit_note", "args": {"note_id": "caminho/nota.md", "content": "conteúdo markdown completo"}}
+{"tool": "create_note", "args": {"path": "caminho/nota.md", "content": "conteúdo markdown completo"}}
+{"tool": "done", "args": {"answer": "resumo do que foi feito"}}
 
-Regras:
-- Responda SOMENTE com um JSON por vez (sem texto antes ou depois)
-- Sempre use search_vault ou list_notes antes de agir
-- Leia a nota com read_note antes de editar
-- Wiki links devem ter alias: [[caminho/nota|Nome Visível]]
-- Preserve frontmatter ao editar notas
-- Termine sempre com {"tool": "done", "args": {"answer": "..."}} relatando o que foi feito
-- Responda em português brasileiro"""
+REGRAS DE KNOWLEDGE GRAPH:
+- Wiki links SEMPRE com alias: [[caminho/nota|Nome Visível]]
+- Exemplo correto: [[05-fontes/Nielsen|Nielsen]]
+- Exemplo errado: [[05-fontes/Nielsen]] ou [[Nielsen]]
+- Preserve frontmatter YAML ao editar notas
+- Adicione links onde houver correlação real, não forçada
+- Use search_vault (ChromaDB) para encontrar notas semanticamente relacionadas antes de criar links
+- Ao terminar uma tarefa longa, resuma TODAS as notas modificadas no "done"
+
+FLUXO PARA REVISÃO DE VAULT:
+1. list_notes → obter todos os IDs
+2. Para cada nota: read_note → identificar menções implícitas → search_vault para confirmar correlações → edit_note com links adicionados
+3. done com resumo completo
+
+NUNCA pare no meio. Complete a tarefa inteira antes de chamar "done"."""
 
 
 def _call_llm_raw(messages: list) -> str:
@@ -349,25 +364,25 @@ def ask(question: str, collections: list | None = None) -> dict:
         messages.append({"role": "assistant", "content": raw})
         log.info(f"LLM: {raw[:200]}")
 
-        # Tenta extrair o primeiro JSON válido da resposta
+        # Extrai JSON da resposta — ignora qualquer texto ao redor
         call = None
-        # Remove blocos de código markdown
         clean = re.sub(r"```(?:json)?\n?(.*?)```", r"\1", raw, flags=re.DOTALL).strip()
-        # Tenta parsear a resposta inteira
+
         try:
             call = json.loads(clean)
         except Exception:
-            # Tenta encontrar o primeiro objeto JSON na resposta
-            for match in re.finditer(r'\{[^{}]*"tool"[^{}]*\}', clean, re.DOTALL):
+            for match in re.finditer(r'\{(?:[^{}]|\{[^{}]*\})*\}', clean, re.DOTALL):
                 try:
-                    call = json.loads(match.group())
-                    break
+                    candidate = json.loads(match.group())
+                    if "tool" in candidate:
+                        call = candidate
+                        break
                 except Exception:
                     continue
 
         if call is None:
-            # Sem JSON válido — resposta final em texto
-            return {"answer": clean, "sources": list(set(sources))}
+            messages.append({"role": "user", "content": "Responda APENAS com um JSON válido. Nenhum texto antes ou depois."})
+            continue
 
         tool = call.get("tool")
         args = call.get("args", {})
@@ -376,8 +391,8 @@ def ask(question: str, collections: list | None = None) -> dict:
             return {"answer": args.get("answer", "Concluído."), "sources": list(set(sources))}
 
         if tool not in TOOL_FNS:
-            # Ferramenta desconhecida — trata como resposta final
-            return {"answer": args.get("answer", clean), "sources": list(set(sources))}
+            messages.append({"role": "user", "content": f"Ferramenta '{tool}' não existe. Use: search_vault, read_note, list_notes, edit_note, create_note, done."})
+            continue
 
         result = TOOL_FNS[tool](args)
         log.info(f"Tool {tool} result: {str(result)[:200]}")
