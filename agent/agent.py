@@ -202,7 +202,7 @@ def tool_create_note(path: str, content: str) -> str:
         "path":     path,
         "ctime":    int(time.time() * 1000),
         "mtime":    int(time.time() * 1000),
-        "size":     len(content),
+        "size":     len(content.encode("utf-8")),
         "type":     "plain",
         "eden":     {},
     }
