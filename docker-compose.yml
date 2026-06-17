@@ -48,6 +48,8 @@ services:
         curl -sf -u "$COUCHDB_USER:$COUCHDB_PASSWORD" -X PUT -H "Content-Type: application/json" "$$B/cors/origins" -d '"app://obsidian.md,capacitor://localhost,http://localhost"' && echo "OK cors/origins" || echo "FAIL cors/origins"
         curl -sf -u "$COUCHDB_USER:$COUCHDB_PASSWORD" -X PUT -H "Content-Type: application/json" "$$B/cors/methods" -d '"GET, PUT, POST, HEAD, DELETE"' && echo "OK cors/methods" || echo "FAIL cors/methods"
         curl -sf -u "$COUCHDB_USER:$COUCHDB_PASSWORD" -X PUT -H "Content-Type: application/json" "$$B/cors/headers" -d '"accept, authorization, content-type, origin, referer"' && echo "OK cors/headers" || echo "FAIL cors/headers"
+        curl -sf -u "$COUCHDB_USER:$COUCHDB_PASSWORD" -X PUT "http://couchdb:5984/_users" && echo "DB _users criado" || echo "DB _users ja existe"
+        curl -sf -u "$COUCHDB_USER:$COUCHDB_PASSWORD" -X PUT "http://couchdb:5984/_replicator" && echo "DB _replicator criado" || echo "DB _replicator ja existe"
         curl -sf -u "$COUCHDB_USER:$COUCHDB_PASSWORD" -X PUT "http://couchdb:5984/$COUCHDB_DB" && echo "DB criado" || echo "DB ja existe"
         echo "CouchDB configurado com sucesso."
 
