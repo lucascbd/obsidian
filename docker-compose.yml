@@ -11,7 +11,6 @@ services:
       - "5984:5984"
     volumes:
       - couchdb_data:/opt/couchdb/data
-      - ./couchdb:/opt/couchdb/etc/local.d
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5984/"]
       interval: 10s
@@ -20,6 +19,36 @@ services:
       start_period: 30s
     networks:
       - obsidian-net
+
+  couchdb-init:
+    image: curlimages/curl:latest
+    container_name: obsidian-couchdb-init
+    restart: "no"
+    depends_on:
+      couchdb:
+        condition: service_healthy
+    networks:
+      - obsidian-net
+    environment:
+      COUCHDB_USER: ${COUCHDB_USER}
+      COUCHDB_PASSWORD: ${COUCHDB_PASSWORD}
+      COUCHDB_DB: ${COUCHDB_DB}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        BASE="http://$${COUCHDB_USER}:$${COUCHDB_PASSWORD}@couchdb:5984"
+        curl -sf -X PUT "$$BASE/_node/_local/_config/chttpd_auth/require_valid_user" -d '"false"'
+        curl -sf -X PUT "$$BASE/_node/_local/_config/httpd/WWW-Authenticate" -d '"Basic realm=\"administrator\""'
+        curl -sf -X PUT "$$BASE/_node/_local/_config/httpd/enable_cors" -d '"true"'
+        curl -sf -X PUT "$$BASE/_node/_local/_config/chttpd/max_http_request_size" -d '"4294967296"'
+        curl -sf -X PUT "$$BASE/_node/_local/_config/couchdb/max_document_size" -d '"50000000"'
+        curl -sf -X PUT "$$BASE/_node/_local/_config/cors/enable" -d '"true"'
+        curl -sf -X PUT "$$BASE/_node/_local/_config/cors/credentials" -d '"true"'
+        curl -sf -X PUT "$$BASE/_node/_local/_config/cors/origins" -d '"app://obsidian.md,capacitor://localhost,http://localhost"'
+        curl -sf -X PUT "$$BASE/_node/_local/_config/cors/methods" -d '"GET, PUT, POST, HEAD, DELETE"'
+        curl -sf -X PUT "$$BASE/_node/_local/_config/cors/headers" -d '"accept, authorization, content-type, origin, referer"'
+        curl -sf -X PUT "$$BASE/$${COUCHDB_DB}" || true
+        echo "CouchDB configurado com sucesso."
 
   chromadb:
     image: chromadb/chroma:latest
