@@ -1,6 +1,5 @@
 requests==2.31.0
 chromadb==0.5.20
-sentence-transformers==3.0.1
+fastembed==0.3.6
 flask==3.0.3
 flask-cors==4.0.0
-numpy<2.0

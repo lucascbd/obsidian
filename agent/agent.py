@@ -6,7 +6,7 @@ import os
 import logging
 import requests
 import chromadb
-from sentence_transformers import SentenceTransformer
+from fastembed import TextEmbedding
 
 log = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ def get_model():
     global _model
     if _model is None:
         log.info("Carregando modelo de embeddings...")
-        _model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+        _model = TextEmbedding("sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
     return _model
 
 
@@ -45,7 +45,7 @@ def search_vault(query: str, collections: list[str] | None = None, n_results: in
     model  = get_model()
     chroma = get_chroma()
 
-    query_embedding = model.encode([query])[0].tolist()
+    query_embedding = list(model.embed([query]))[0].tolist()
     results = []
 
     for col_name in cols:

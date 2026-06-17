@@ -8,7 +8,7 @@ import time
 import logging
 import requests
 import chromadb
-from sentence_transformers import SentenceTransformer
+from fastembed import TextEmbedding
 
 logging.basicConfig(
     level=logging.INFO,
@@ -94,7 +94,7 @@ def ensure_db():
 
 
 # ── Indexação ────────────────────────────────────────────────────────────────
-def index_note(doc: dict, chroma: chromadb.HttpClient, model: SentenceTransformer):
+def index_note(doc: dict, chroma: chromadb.HttpClient, model: TextEmbedding):
     note_id = doc.get("_id", "")
 
     # Ignora documentos internos do CouchDB e do LiveSync
@@ -115,7 +115,7 @@ def index_note(doc: dict, chroma: chromadb.HttpClient, model: SentenceTransforme
         pass
 
     chunks     = chunk_text(content)
-    embeddings = model.encode(chunks).tolist()
+    embeddings = [e.tolist() for e in model.embed(chunks)]
 
     collection.add(
         documents=chunks,
@@ -142,7 +142,7 @@ def delete_note(note_id: str, chroma: chromadb.HttpClient):
 
 
 # ── Full reindex ─────────────────────────────────────────────────────────────
-def full_reindex(chroma: chromadb.HttpClient, model: SentenceTransformer):
+def full_reindex(chroma: chromadb.HttpClient, model: TextEmbedding):
     log.info("Iniciando reindexação completa...")
     skip, limit = 0, 100
     total = 0
@@ -164,7 +164,7 @@ def full_reindex(chroma: chromadb.HttpClient, model: SentenceTransformer):
 
 
 # ── Changes feed ─────────────────────────────────────────────────────────────
-def watch(chroma: chromadb.HttpClient, model: SentenceTransformer):
+def watch(chroma: chromadb.HttpClient, model: TextEmbedding):
     last_seq = "0"
     log.info("Monitorando mudanças no CouchDB...")
 
@@ -205,7 +205,7 @@ if __name__ == "__main__":
     ensure_db()
 
     log.info("Carregando modelo de embeddings (paraphrase-multilingual-MiniLM-L12-v2)...")
-    model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+    model = TextEmbedding("sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
     chroma = chromadb.HttpClient(host=CHROMA_HOST, port=CHROMA_PORT)
 
     full_reindex(chroma, model)
