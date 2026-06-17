@@ -6,7 +6,7 @@ import os
 import logging
 from flask import Flask, request, jsonify, render_template_string
 from flask_cors import CORS
-from agent import ask, weekly_summary, market_insights, summarize_meeting, vault_review, repair_vault
+from agent import ask, weekly_summary, market_insights, summarize_meeting, vault_review, repair_vault, ingest_file, ingest_url
 
 logging.basicConfig(
     level=logging.INFO,
@@ -135,9 +135,28 @@ HTML = """<!DOCTYPE html>
   .scrollbar-thin::-webkit-scrollbar { width: 4px; }
   .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
   .scrollbar-thin::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .upload-btn {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; color: var(--label); padding: 9px 12px;
+    font-size: 13px; cursor: pointer; font-family: 'Inter', sans-serif;
+    height: 44px; display: flex; align-items: center; gap: 6px;
+    transition: all 0.15s;
+  }
+  .upload-btn:hover { border-color: var(--accent); color: var(--text); }
+
+  .drop-overlay {
+    position: fixed; inset: 0; background: rgba(79,127,255,.15);
+    border: 2px dashed var(--accent); z-index: 999;
+    display: none; align-items: center; justify-content: center;
+    font-size: 20px; color: var(--accent); pointer-events: none;
+  }
+  .drop-overlay.active { display: flex; }
 </style>
 </head>
 <body>
+<div class="drop-overlay" id="drop-overlay">📄 Solte o arquivo para importar</div>
+<input type="file" id="file-input" style="display:none" accept=".pdf,.docx,.txt,.md,.html,.htm,.csv">
 
 <header>
   <h1>🧠 Obsidian MI Agent</h1>
@@ -146,6 +165,9 @@ HTML = """<!DOCTYPE html>
 
 <div class="layout">
   <aside class="sidebar">
+    <div class="sidebar-label">Importar</div>
+    <button class="action-btn" onclick="document.getElementById('file-input').click()">📄 Arquivo (PDF, DOCX…)</button>
+    <button class="action-btn" onclick="promptURL()">🔗 URL / Artigo</button>
     <div class="sidebar-label">Ações rápidas</div>
     <button class="action-btn" onclick="runAction('weekly')">📅 Resumo semanal</button>
     <button class="action-btn" onclick="runAction('insights')">💡 Insights de mercado</button>
@@ -282,6 +304,63 @@ HTML = """<!DOCTYPE html>
     input.focus();
   }
 
+  // ── Upload ────────────────────────────────────────────────────────────────
+  document.getElementById('file-input').addEventListener('change', async e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    e.target.value = '';
+    await uploadFile(file);
+  });
+
+  document.addEventListener('dragover', e => { e.preventDefault(); document.getElementById('drop-overlay').classList.add('active'); });
+  document.addEventListener('dragleave', e => { if (!e.relatedTarget) document.getElementById('drop-overlay').classList.remove('active'); });
+  document.addEventListener('drop', async e => {
+    e.preventDefault();
+    document.getElementById('drop-overlay').classList.remove('active');
+    const file = e.dataTransfer.files[0];
+    if (file) await uploadFile(file);
+  });
+
+  async function uploadFile(file) {
+    appendMsg('user', `📄 Importando: ${file.name}`);
+    appendTyping();
+    document.getElementById('send-btn').disabled = true;
+    const form = new FormData();
+    form.append('file', file);
+    try {
+      const r = await fetch('/api/upload', { method: 'POST', body: form });
+      const data = await r.json();
+      removeTyping();
+      appendMsg('agent', data.answer, data.sources);
+    } catch(e) {
+      removeTyping();
+      appendMsg('agent', '❌ Erro ao importar arquivo.');
+    }
+    document.getElementById('send-btn').disabled = false;
+  }
+
+  async function promptURL() {
+    const url = prompt('Cole a URL do artigo ou página:');
+    if (!url || !url.startsWith('http')) return;
+    appendMsg('user', `🔗 Importando URL: ${url}`);
+    appendTyping();
+    document.getElementById('send-btn').disabled = true;
+    try {
+      const r = await fetch('/api/upload-url', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url })
+      });
+      const data = await r.json();
+      removeTyping();
+      appendMsg('agent', data.answer, data.sources);
+    } catch(e) {
+      removeTyping();
+      appendMsg('agent', '❌ Erro ao importar URL.');
+    }
+    document.getElementById('send-btn').disabled = false;
+  }
+
   async function runAction(action) {
     document.getElementById('send-btn').disabled = true;
     const labels = { weekly: '📅 Resumo semanal', insights: '💡 Insights de mercado', 'vault-review': '🔗 Revisar vault' };
@@ -348,6 +427,28 @@ def api_meeting():
     if not note_id:
         return jsonify({"error": "note_id obrigatório"}), 400
     return jsonify(summarize_meeting(note_id))
+
+
+@app.route("/api/upload", methods=["POST"])
+def api_upload():
+    if "file" not in request.files:
+        return jsonify({"error": "arquivo obrigatório"}), 400
+    f = request.files["file"]
+    content = f.read()
+    if not content:
+        return jsonify({"error": "arquivo vazio"}), 400
+    result = ingest_file(f.filename, content)
+    return jsonify(result)
+
+
+@app.route("/api/upload-url", methods=["POST"])
+def api_upload_url():
+    data = request.get_json()
+    url  = (data or {}).get("url", "").strip()
+    if not url:
+        return jsonify({"error": "url obrigatória"}), 400
+    result = ingest_url(url)
+    return jsonify(result)
 
 
 @app.route("/health")

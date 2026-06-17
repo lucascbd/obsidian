@@ -4,6 +4,7 @@ agent.py — Agente com tool calling: lê e escreve no vault via CouchDB/ChromaD
 
 import os
 import re
+import io
 import json
 import logging
 import requests
@@ -213,6 +214,126 @@ def tool_create_note(path: str, content: str) -> str:
         return f"Nota '{path}' criada com sucesso."
     except Exception as e:
         return f"Erro ao criar nota: {e}"
+
+
+# ── Ingestão de arquivos e URLs ──────────────────────────────────────────────
+def _extract_text_from_file(filename: str, content: bytes) -> str:
+    """Extrai texto de PDF, DOCX, TXT, MD ou HTML."""
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if ext == "pdf":
+        from pypdf import PdfReader
+        reader = PdfReader(io.BytesIO(content))
+        return "\n\n".join(page.extract_text() or "" for page in reader.pages)
+    if ext in ("docx",):
+        from docx import Document
+        doc = Document(io.BytesIO(content))
+        return "\n\n".join(p.text for p in doc.paragraphs if p.text.strip())
+    if ext in ("html", "htm"):
+        from bs4 import BeautifulSoup
+        import markdownify
+        soup = BeautifulSoup(content, "html.parser")
+        return markdownify.markdownify(str(soup), heading_style="ATX")
+    # txt, md, csv, json — trata como texto plano
+    return content.decode("utf-8", errors="replace")
+
+
+def _extract_text_from_url(url: str) -> str:
+    """Busca URL e extrai texto em markdown."""
+    import markdownify
+    from bs4 import BeautifulSoup
+    r = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+    r.raise_for_status()
+    ct = r.headers.get("content-type", "")
+    if "pdf" in ct:
+        return _extract_text_from_file("page.pdf", r.content)
+    soup = BeautifulSoup(r.content, "html.parser")
+    for tag in soup(["script", "style", "nav", "footer", "header"]):
+        tag.decompose()
+    main = soup.find("article") or soup.find("main") or soup.body or soup
+    return markdownify.markdownify(str(main), heading_style="ATX")
+
+
+INGEST_PROMPT = """Você é um assistente que converte conteúdo bruto em notas Obsidian bem estruturadas.
+
+Dado o conteúdo extraído abaixo, você deve:
+1. Escolher a pasta correta:
+   - 00-inbox        → rascunhos, conteúdo não categorizado
+   - 01-projetos     → projetos, iniciativas, planos
+   - 02-analises     → análises, estudos, relatórios
+   - 03-stakeholders → pessoas, empresas, parceiros
+   - 04-referencias  → artigos, livros, fontes externas
+   - 05-reunioes     → atas de reunião, encontros
+2. Criar um slug de nome de arquivo (lowercase, hifens, sem acentos, .md)
+3. Escrever a nota em markdown com:
+   - Frontmatter YAML: title, date (hoje), source (se URL), tags
+   - Seções bem organizadas com # ## ###
+   - Linguagem concisa em português
+4. Ao final, liste wiki links para notas existentes no vault que sejam relacionadas.
+
+NOTAS EXISTENTES NO VAULT:
+{note_ids}
+
+Responda APENAS com um JSON no formato:
+{{"path": "01-projetos/nome-do-arquivo.md", "content": "conteúdo completo da nota", "summary": "1-2 frases descrevendo o que foi criado"}}"""
+
+
+def ingest(raw_text: str, source_name: str) -> dict:
+    """Converte texto bruto em nota Obsidian e salva no vault."""
+    note_ids = tool_list_notes()
+
+    prompt = INGEST_PROMPT.replace("{note_ids}", note_ids[:3000])
+    user_msg = f"FONTE: {source_name}\n\nCONTEÚDO:\n{raw_text[:8000]}"
+
+    messages = [
+        {"role": "system", "content": prompt},
+        {"role": "user",   "content": user_msg},
+    ]
+
+    for attempt in range(3):
+        raw = _call_llm_raw(messages)
+        clean = re.sub(r"```(?:json)?\n?(.*?)```", r"\1", raw, flags=re.DOTALL).strip()
+        try:
+            data = json.loads(clean)
+        except Exception:
+            for match in re.finditer(r'\{(?:[^{}]|\{[^{}]*\})*\}', clean, re.DOTALL):
+                try:
+                    data = json.loads(match.group())
+                    break
+                except Exception:
+                    pass
+            else:
+                messages.append({"role": "assistant", "content": raw})
+                messages.append({"role": "user", "content": "Responda APENAS com um JSON válido conforme o formato solicitado."})
+                continue
+
+        path    = data.get("path", "00-inbox/imported.md")
+        content = data.get("content", raw_text[:4000])
+        summary = data.get("summary", f"Nota criada a partir de {source_name}")
+
+        result = tool_create_note(path, content)
+        log.info(f"Ingest: {result}")
+
+        # Dispara busca de correlações e adiciona links em segundo plano (via ask)
+        return {
+            "answer":  f"{summary}\n\nNota criada: `{path}`\n\n{result}",
+            "sources": [path],
+            "path":    path,
+        }
+
+    return {"answer": "Falha ao processar o conteúdo após 3 tentativas.", "sources": []}
+
+
+def ingest_file(filename: str, content: bytes) -> dict:
+    raw_text = _extract_text_from_file(filename, content)
+    return ingest(raw_text, source_name=filename)
+
+
+def ingest_url(url: str) -> dict:
+    try:
+        raw_text = _extract_text_from_url(url)
+    except Exception as e:
+        return {"answer": f"Erro ao buscar URL: {e}", "sources": []}
+    return ingest(raw_text, source_name=url)
 
 
 # ── Tool calling loop ─────────────────────────────────────────────────────────
