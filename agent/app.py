@@ -6,7 +6,7 @@ import os
 import logging
 from flask import Flask, request, jsonify, render_template_string
 from flask_cors import CORS
-from agent import ask, weekly_summary, market_insights, summarize_meeting
+from agent import ask, weekly_summary, market_insights, summarize_meeting, vault_review
 
 logging.basicConfig(
     level=logging.INFO,
@@ -149,6 +149,7 @@ HTML = """<!DOCTYPE html>
     <div class="sidebar-label">Ações rápidas</div>
     <button class="action-btn" onclick="runAction('weekly')">📅 Resumo semanal</button>
     <button class="action-btn" onclick="runAction('insights')">💡 Insights de mercado</button>
+    <button class="action-btn" onclick="runAction('vault-review')">🔗 Revisar vault</button>
     <div class="sidebar-label">Filtrar por</div>
     <button class="action-btn" id="f-all"          onclick="setFilter(null, this)">🗂 Tudo</button>
     <button class="action-btn" id="f-reunioes"     onclick="setFilter('reunioes', this)">📝 Reuniões</button>
@@ -283,7 +284,7 @@ HTML = """<!DOCTYPE html>
 
   async function runAction(action) {
     document.getElementById('send-btn').disabled = true;
-    const labels = { weekly: '📅 Resumo semanal', insights: '💡 Insights de mercado' };
+    const labels = { weekly: '📅 Resumo semanal', insights: '💡 Insights de mercado', 'vault-review': '🔗 Revisar vault' };
     appendMsg('user', labels[action]);
     appendTyping();
 
@@ -328,6 +329,11 @@ def api_weekly():
 @app.route("/api/insights", methods=["POST"])
 def api_insights():
     return jsonify(market_insights())
+
+
+@app.route("/api/vault-review", methods=["POST"])
+def api_vault_review():
+    return jsonify(vault_review())
 
 
 @app.route("/api/meeting", methods=["POST"])
