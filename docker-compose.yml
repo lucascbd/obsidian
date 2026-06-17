@@ -36,21 +36,19 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        BASE="http://couchdb:5984"
-        AUTH="--user $${COUCHDB_USER}:$${COUCHDB_PASSWORD}"
-        curl -sf -X PUT $$AUTH "$$BASE/_node/_local/_config/chttpd_auth/require_valid_user" -d '"false"'
-        curl -sf -X PUT $$AUTH "$$BASE/_node/_local/_config/httpd/WWW-Authenticate" -d '"Basic realm=\"administrator\""'
-        curl -sf -X PUT $$AUTH "$$BASE/_node/_local/_config/httpd/enable_cors" -d '"true"'
-        curl -sf -X PUT $$AUTH "$$BASE/_node/_local/_config/chttpd/max_http_request_size" -d '"4294967296"'
-        curl -sf -X PUT $$AUTH "$$BASE/_node/_local/_config/couchdb/max_document_size" -d '"50000000"'
-        curl -sf -X PUT $$AUTH "$$BASE/_node/_local/_config/cors/enable" -d '"true"'
-        curl -sf -X PUT $$AUTH "$$BASE/_node/_local/_config/cors/credentials" -d '"true"'
-        curl -sf -X PUT $$AUTH "$$BASE/_node/_local/_config/cors/origins" -d '"app://obsidian.md,capacitor://localhost,http://localhost"'
-        curl -sf -X PUT $$AUTH "$$BASE/_node/_local/_config/cors/methods" -d '"GET, PUT, POST, HEAD, DELETE"'
-        curl -sf -X PUT $$AUTH "$$BASE/_node/_local/_config/cors/headers" -d '"accept, authorization, content-type, origin, referer"'
-        curl -sf -X PUT $$AUTH "$$BASE/$${COUCHDB_DB}" || true
+        B="http://couchdb:5984/_node/_local/_config"
+        curl -sf -u "$COUCHDB_USER:$COUCHDB_PASSWORD" -X PUT -H "Content-Type: application/json" "$$B/chttpd_auth/require_valid_user" -d '"false"' && echo "OK require_valid_user" || echo "FAIL require_valid_user"
+        curl -sf -u "$COUCHDB_USER:$COUCHDB_PASSWORD" -X PUT -H "Content-Type: application/json" "$$B/httpd/WWW-Authenticate" -d '"Basic realm=\\"administrator\\""' && echo "OK WWW-Auth" || echo "FAIL WWW-Auth"
+        curl -sf -u "$COUCHDB_USER:$COUCHDB_PASSWORD" -X PUT -H "Content-Type: application/json" "$$B/httpd/enable_cors" -d '"true"' && echo "OK enable_cors" || echo "FAIL enable_cors"
+        curl -sf -u "$COUCHDB_USER:$COUCHDB_PASSWORD" -X PUT -H "Content-Type: application/json" "$$B/chttpd/max_http_request_size" -d '"4294967296"' && echo "OK max_http" || echo "FAIL max_http"
+        curl -sf -u "$COUCHDB_USER:$COUCHDB_PASSWORD" -X PUT -H "Content-Type: application/json" "$$B/couchdb/max_document_size" -d '"50000000"' && echo "OK max_doc" || echo "FAIL max_doc"
+        curl -sf -u "$COUCHDB_USER:$COUCHDB_PASSWORD" -X PUT -H "Content-Type: application/json" "$$B/cors/enable" -d '"true"' && echo "OK cors/enable" || echo "FAIL cors/enable"
+        curl -sf -u "$COUCHDB_USER:$COUCHDB_PASSWORD" -X PUT -H "Content-Type: application/json" "$$B/cors/credentials" -d '"true"' && echo "OK cors/credentials" || echo "FAIL cors/credentials"
+        curl -sf -u "$COUCHDB_USER:$COUCHDB_PASSWORD" -X PUT -H "Content-Type: application/json" "$$B/cors/origins" -d '"app://obsidian.md,capacitor://localhost,http://localhost"' && echo "OK cors/origins" || echo "FAIL cors/origins"
+        curl -sf -u "$COUCHDB_USER:$COUCHDB_PASSWORD" -X PUT -H "Content-Type: application/json" "$$B/cors/methods" -d '"GET, PUT, POST, HEAD, DELETE"' && echo "OK cors/methods" || echo "FAIL cors/methods"
+        curl -sf -u "$COUCHDB_USER:$COUCHDB_PASSWORD" -X PUT -H "Content-Type: application/json" "$$B/cors/headers" -d '"accept, authorization, content-type, origin, referer"' && echo "OK cors/headers" || echo "FAIL cors/headers"
+        curl -sf -u "$COUCHDB_USER:$COUCHDB_PASSWORD" -X PUT "http://couchdb:5984/$COUCHDB_DB" && echo "DB criado" || echo "DB ja existe"
         echo "CouchDB configurado com sucesso."
-        exit 0
 
   chromadb:
     image: chromadb/chroma:latest
