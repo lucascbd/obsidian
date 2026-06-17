@@ -66,9 +66,14 @@ def _read_note_content(doc: dict) -> str:
 
 
 def _write_note_content(doc: dict, new_content: str) -> bool:
+    import time
+
     children = doc.get("children", [])
     if not children:
         return False
+
+    # Divide conteúdo proporcionalmente entre os leaves existentes
+    # ou usa um único leaf se houver apenas um
     leaves = []
     for leaf_id in children:
         try:
@@ -88,11 +93,11 @@ def _write_note_content(doc: dict, new_content: str) -> bool:
         leaf["data"] = chunk
         _couch("put", leaf["_id"], json=leaf)
 
-    # Atualiza size (em bytes, como o LiveSync espera) e mtime no documento pai
-    import time
-    doc["size"] = len(new_content.encode("utf-8"))
-    doc["mtime"] = int(time.time() * 1000)
-    _couch("put", doc["_id"], json=doc)
+    # Re-busca o doc para garantir _rev atualizado antes do PUT final
+    fresh = _couch("get", doc["_id"])
+    fresh["size"]  = len(new_content.encode("utf-8"))
+    fresh["mtime"] = int(time.time() * 1000)
+    _couch("put", fresh["_id"], json=fresh)
     return True
 
 
@@ -175,17 +180,19 @@ def tool_edit_note(note_id: str, content: str) -> str:
 
 
 def tool_list_notes() -> str:
-    """Lista todas as notas ativas do vault."""
+    """Lista todas as notas ativas (não deletadas) do vault."""
     try:
         r = requests.get(
             f"{COUCHDB_URL}/{COUCHDB_DB}/_all_docs",
-            params={"include_docs": False},
-            auth=COUCHDB_AUTH, timeout=15,
+            params={"include_docs": True},
+            auth=COUCHDB_AUTH, timeout=30,
         )
         r.raise_for_status()
         ids = [
             row["id"] for row in r.json().get("rows", [])
-            if not row["id"].startswith("_") and not row["id"].startswith("h:")
+            if not row["id"].startswith("_")
+            and not row["id"].startswith("h:")
+            and not row.get("doc", {}).get("deleted")
         ]
         return json.dumps(ids, ensure_ascii=False)
     except Exception as e:
