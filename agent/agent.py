@@ -125,7 +125,8 @@ def repair_vault() -> dict:
         "answer": f"{len(fixed)} documento(s) reparado(s).\n" + "\n".join(fixed) if fixed else "Nenhum documento com size incorreto encontrado.",
         "sources": fixed,
     }
-(query: str, collections: list | None = None) -> str:
+
+def tool_search_vault(query: str, collections: list | None = None) -> str:
     """Busca semântica no vault via ChromaDB."""
     cols  = collections or COLLECTIONS
     model = get_embed_model()
