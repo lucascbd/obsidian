@@ -71,8 +71,6 @@ services:
 
   watcher:
     image: ghcr.io/lucascbd/obsidian-watcher:latest
-    build:
-      context: ./watcher
     container_name: obsidian-watcher
     restart: unless-stopped
     environment:
@@ -92,8 +90,6 @@ services:
 
   agent:
     image: ghcr.io/lucascbd/obsidian-agent:latest
-    build:
-      context: ./agent
     container_name: obsidian-agent
     restart: unless-stopped
     ports:
