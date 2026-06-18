@@ -501,6 +501,110 @@ def ingest_zip(content: bytes, root: str | None = None) -> dict:
 
 
 # ── Tool calling loop ─────────────────────────────────────────────────────────
+def tool_move_note(source_id: str, dest_id: str) -> str:
+    """Move/renomeia uma nota: copia conteúdo e leaves para o novo ID e marca o original como deleted."""
+    import time, hashlib
+    try:
+        src_doc = _couch("get", source_id)
+        if src_doc.get("deleted"):
+            return f"Nota '{source_id}' já está deletada."
+        content = _read_note_content(src_doc)
+
+        # Cria novo leaf e doc no destino
+        leaf_id = "h:" + hashlib.md5(f"{dest_id}{time.time()}".encode()).hexdigest()[:13]
+        leaf = {"_id": leaf_id, "data": content, "type": "leaf"}
+        doc  = {
+            "_id":      dest_id,
+            "children": [leaf_id],
+            "path":     dest_id,
+            "ctime":    src_doc.get("ctime", int(time.time() * 1000)),
+            "mtime":    int(time.time() * 1000),
+            "size":     len(content.encode("utf-8")),
+            "type":     "plain",
+            "eden":     {},
+        }
+        _couch("put", leaf_id, json=leaf)
+        _couch("put", dest_id, json=doc)
+
+        # Marca original como deleted (formato LiveSync)
+        src_doc["deleted"] = True
+        src_doc["mtime"]   = int(time.time() * 1000)
+        _couch("put", source_id, json=src_doc)
+
+        log.info(f"move_note: {source_id} → {dest_id}")
+        return f"Nota movida: '{source_id}' → '{dest_id}'"
+    except Exception as e:
+        return f"Erro ao mover nota: {e}"
+
+
+def tool_delete_note(note_id: str) -> str:
+    """Marca uma nota como deleted=true no CouchDB (formato LiveSync). Use apenas para duplicatas confirmadas."""
+    import time
+    try:
+        doc = _couch("get", note_id)
+        if doc.get("deleted"):
+            return f"Nota '{note_id}' já estava deletada."
+        doc["deleted"] = True
+        doc["mtime"]   = int(time.time() * 1000)
+        _couch("put", note_id, json=doc)
+        log.info(f"delete_note: {note_id}")
+        return f"Nota '{note_id}' deletada."
+    except Exception as e:
+        return f"Erro ao deletar nota '{note_id}': {e}"
+
+
+def tool_add_tags(note_id: str, tags: list[str]) -> str:
+    """Adiciona tags ao frontmatter YAML de uma nota. Cria o bloco --- se não existir. Não duplica tags já presentes."""
+    try:
+        doc = _couch("get", note_id)
+        content = _read_note_content(doc)
+
+        # Extrai frontmatter
+        if content.startswith("---"):
+            end = content.find("\n---", 3)
+            if end == -1:
+                # Sem fechamento — adiciona frontmatter do zero antes do conteúdo
+                existing_tags = []
+                fm = ""
+                body = content
+            else:
+                fm = content[3:end]
+                body = content[end + 4:]  # após o ---\n de fechamento
+                # Extrai tags já existentes
+                existing_tags = re.findall(r"^\s*-\s+(\S+)", fm.split("tags:", 1)[-1].split("\n\n")[0], re.MULTILINE) if "tags:" in fm else []
+        else:
+            fm = ""
+            body = content
+            existing_tags = []
+
+        new_tags = [t for t in tags if t not in existing_tags]
+        if not new_tags:
+            return f"Nenhuma tag nova para adicionar em '{note_id}' (já existem: {existing_tags})."
+
+        tags_yaml = "\n".join(f"  - {t}" for t in new_tags)
+
+        if fm and "tags:" in fm:
+            # Insere novas tags logo após o último item existente da lista
+            updated_fm = re.sub(
+                r"(tags:(?:\n  - \S+)*)",
+                lambda m: m.group(0) + "\n" + tags_yaml,
+                fm,
+            )
+        elif fm:
+            updated_fm = fm.rstrip() + f"\ntags:\n{tags_yaml}\n"
+        else:
+            updated_fm = f"tags:\n{tags_yaml}\n"
+
+        new_content = f"---\n{updated_fm}\n---\n{body}"
+        ok = _write_note_content(doc, new_content)
+        if not ok:
+            return f"Falha ao salvar tags em '{note_id}'."
+        log.info(f"add_tags: {note_id} +{new_tags}")
+        return f"Tags adicionadas em '{note_id}': {new_tags}"
+    except Exception as e:
+        return f"Erro ao adicionar tags em '{note_id}': {e}"
+
+
 TOOLS = [
     {
         "type": "function",
@@ -570,6 +674,50 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "move_note",
+            "description": "Move ou renomeia uma nota. Copia o conteúdo para o novo caminho e marca o original como deletado. Use para reorganizar pastas ou corrigir nomes.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "source_id": {"type": "string", "description": "Caminho atual da nota"},
+                    "dest_id":   {"type": "string", "description": "Novo caminho da nota"},
+                },
+                "required": ["source_id", "dest_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_note",
+            "description": "Deleta permanentemente uma nota. Use SOMENTE para duplicatas confirmadas ou notas que o usuário pediu para remover.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "note_id": {"type": "string", "description": "Caminho da nota a deletar"},
+                },
+                "required": ["note_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_tags",
+            "description": "Adiciona tags ao frontmatter YAML de uma nota sem sobrescrever o conteúdo. Mais seguro que edit_note para mudanças só de tags.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "note_id": {"type": "string", "description": "Caminho da nota"},
+                    "tags":    {"type": "array", "items": {"type": "string"}, "description": "Tags a adicionar, ex: ['politica', 'analise', 'brasil']"},
+                },
+                "required": ["note_id", "tags"],
+            },
+        },
+    },
 ]
 
 TOOL_FNS = {
@@ -578,18 +726,19 @@ TOOL_FNS = {
     "list_notes":   lambda args: tool_list_notes(),
     "edit_note":    lambda args: tool_edit_note(**args),
     "create_note":  lambda args: tool_create_note(**args),
+    "move_note":    lambda args: tool_move_note(**args),
+    "delete_note":  lambda args: tool_delete_note(**args),
+    "add_tags":     lambda args: tool_add_tags(**args),
 }
 
 SYSTEM_PROMPT = """Você é o Mordomo do Conhecimento — um agente autônomo que organiza, conecta e enriquece o vault Obsidian do usuário.
 
 MISSÃO:
-Transformar informações brutas em conhecimento navegável. Você decide a estrutura de pastas, cria notas, estabelece conexões e mantém o vault sempre organizado e coerente. Você age como um mordomo inteligente: antecipa necessidades, organiza sem pedir permissão, e executa tarefas até o fim.
+Transformar informações brutas em conhecimento navegável. Você decide a estrutura de pastas, cria notas, estabelece conexões e mantém o vault sempre organizado e coerente. Você age como um mordomo inteligente: antecipa necessidades, organiza sem pedir permissão, e executa tarefas até o fim — sem parar no meio, sem pedir confirmação.
 
 ESTRUTURA DE PASTAS — LIVRE:
 - Você pode criar qualquer pasta e subpasta que faça sentido para o contexto
-- Exemplos válidos: "clientes/acme/projetos/", "mercado/latam/analises/", "pessoas/equipe/", "produtos/roadmap/"
-- Prefira hierarquias semânticas ao invés de números: "projetos/nome-do-projeto/" ao invés de "01-projetos/"
-- Crie pastas temáticas conforme o conteúdo cresce
+- Prefira hierarquias semânticas: "projetos/nome-do-projeto/" ao invés de "01-projetos/"
 - Use slugs em lowercase com hifens, sem acentos: "reuniao-kick-off.md"
 
 FORMATO OBRIGATÓRIO — SEM EXCEÇÃO:
@@ -603,22 +752,27 @@ FORMATO OBRIGATÓRIO — SEM EXCEÇÃO:
 {"tool": "list_notes", "args": {}}
 {"tool": "edit_note", "args": {"note_id": "caminho/nota.md", "content": "conteúdo markdown completo"}}
 {"tool": "create_note", "args": {"path": "pasta/subpasta/nota.md", "content": "conteúdo markdown completo"}}
+{"tool": "move_note", "args": {"source_id": "caminho/atual.md", "dest_id": "caminho/novo.md"}}
+{"tool": "delete_note", "args": {"note_id": "caminho/nota.md"}}
+{"tool": "add_tags", "args": {"note_id": "caminho/nota.md", "tags": ["tag1", "tag2"]}}
 {"tool": "done", "args": {"answer": "resumo completo do que foi feito"}}
+
+REGRAS DE EXECUÇÃO:
+- Execute a tarefa COMPLETA até o fim. Se há 50 notas para processar, processe as 50.
+- Não pare no meio para "listar pendências" — execute as pendências.
+- Se uma subtarefa falhar, continue com as próximas sem parar.
+- Ao reorganizar pastas: use move_note (não criar + deletar manualmente).
+- Ao padronizar tags: use add_tags (mais seguro que edit_note para só adicionar tags).
+- Ao deletar duplicatas: confirme que o conteúdo foi movido antes de usar delete_note.
 
 REGRAS DE KNOWLEDGE GRAPH:
 - Wiki links SEMPRE com alias: [[caminho/nota|Nome Visível]]
-- Exemplo correto: [[clientes/acme/perfil|ACME]]
-- Exemplo errado: [[clientes/acme/perfil]] ou [[ACME]]
 - Preserve frontmatter YAML ao editar notas
-- Adicione links onde houver correlação real — pessoas, projetos, temas, empresas
-- Use search_vault (ChromaDB) para descobrir correlações antes de criar links
 - Frontmatter mínimo: title, date, tags
 
-COMPORTAMENTO:
-- Execute a tarefa completa sem parar no meio
-- Se uma subtarefa falhar, continue com as próximas
-- Ao criar uma nota, sempre busque (search_vault) notas relacionadas para adicionar wiki links
-- No "done", liste todas as notas criadas/editadas com uma linha de descrição cada"""
+CONCLUSÃO:
+- Só chame "done" quando TUDO estiver feito
+- No "done", liste cada nota movida/editada/criada/deletada com uma linha de descrição"""
 
 
 def _call_llm_raw(messages: list) -> str:
@@ -682,12 +836,37 @@ def ask(question: str, collections: list | None = None, root: str | None = None)
                 args = {**args, "path": f"{root}/{path}"}
         return tool_create_note(**args)
 
+    def _scoped_move(args):
+        src = args.get("source_id", "")
+        dst = args.get("dest_id", "")
+        if root:
+            if not src.startswith(root + "/"):
+                return f"Bloqueado: source '{src}' fora do escopo '{root}/'."
+            if not dst.startswith(root + "/"):
+                args = {**args, "dest_id": f"{root}/{dst}"}
+        return tool_move_note(**args)
+
+    def _scoped_delete(args):
+        nid = args.get("note_id", "")
+        if root and not nid.startswith(root + "/"):
+            return f"Bloqueado: nota '{nid}' fora do escopo '{root}/'."
+        return tool_delete_note(**args)
+
+    def _scoped_add_tags(args):
+        nid = args.get("note_id", "")
+        if root and not nid.startswith(root + "/"):
+            return f"Bloqueado: nota '{nid}' fora do escopo '{root}/'."
+        return tool_add_tags(**args)
+
     scoped_fns = {
         "search_vault": _scoped_search,
         "read_note":    _scoped_read,
         "list_notes":   _scoped_list,
         "edit_note":    _scoped_edit,
         "create_note":  _scoped_create,
+        "move_note":    _scoped_move,
+        "delete_note":  _scoped_delete,
+        "add_tags":     _scoped_add_tags,
     }
 
     bad_format_streak = 0
@@ -732,8 +911,12 @@ def ask(question: str, collections: list | None = None, root: str | None = None)
         result = scoped_fns[tool](args)
         log.info(f"Tool {tool} result: {str(result)[:200]}")
 
-        if tool in ("edit_note", "create_note"):
+        if tool in ("edit_note", "create_note", "add_tags"):
             sources.append(args.get("note_id") or args.get("path", ""))
+        elif tool == "move_note":
+            sources.append(args.get("dest_id", ""))
+        elif tool == "delete_note":
+            sources.append(args.get("note_id", ""))
 
         messages.append({"role": "user", "content": f"Resultado de {tool}:\n{result}"})
 
