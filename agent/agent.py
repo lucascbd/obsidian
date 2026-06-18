@@ -955,7 +955,14 @@ def _call_llm_raw(messages: list) -> str:
     if not r.ok:
         log.error(f"OpenRouter error {r.status_code}: {r.text}")
     r.raise_for_status()
-    return r.json()["choices"][0]["message"]["content"].strip()
+    msg = r.json()["choices"][0]["message"]
+    content = msg.get("content") or ""
+    # Alguns modelos retornam content=null com tool_calls — extrai o JSON do tool call
+    if not content and msg.get("tool_calls"):
+        tc = msg["tool_calls"][0]
+        fn = tc.get("function", {})
+        content = json.dumps({"tool": fn.get("name"), "args": json.loads(fn.get("arguments", "{}"))})
+    return content.strip()
 
 
 def ask(question: str, collections: Optional[list] = None, root: Optional[str] = None,

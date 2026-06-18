@@ -86,6 +86,9 @@ HTML = """<!DOCTYPE html>
   .msg.agent .msg-bubble { background: var(--surface); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
 
   .msg-sources { display: flex; gap: 6px; flex-wrap: wrap; }
+  .msg-time { font-size: 10px; color: var(--muted); margin-top: 4px; font-family: 'JetBrains Mono', monospace; }
+  .msg.user .msg-time { text-align: right; }
+  .msg.agent .msg-time { text-align: left; }
   .source-tag {
     font-size: 10px; padding: 2px 8px; border-radius: 4px;
     background: var(--surface2); border: 1px solid var(--border);
@@ -275,6 +278,11 @@ HTML = """<!DOCTYPE html>
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
   }
 
+  function _fmtTime() {
+    const now = new Date();
+    return now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+  }
+
   function appendMsg(role, content, sources) {
     const chat = document.getElementById('chat');
     document.getElementById('empty')?.remove();
@@ -299,6 +307,11 @@ HTML = """<!DOCTYPE html>
       });
       div.appendChild(src);
     }
+
+    const ts = document.createElement('div');
+    ts.className = 'msg-time';
+    ts.textContent = _fmtTime();
+    div.appendChild(ts);
 
     chat.appendChild(div);
     chat.scrollTop = chat.scrollHeight;
