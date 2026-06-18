@@ -400,6 +400,7 @@ HTML = """<!DOCTYPE html>
         buffer = lines.pop(); // guarda linha incompleta
 
         for (const line of lines) {
+          if (line.startsWith(': ')) continue; // keepalive — ignora
           if (!line.startsWith('data: ')) continue;
           try {
             const evt = JSON.parse(line.slice(6));
@@ -632,9 +633,14 @@ def api_ask_stream():
     def _generate():
         while True:
             try:
-                item = q.get(timeout=180)
+                item = q.get(timeout=30)  # verifica a cada 30s
             except queue.Empty:
-                yield f"data: {json.dumps({'type': 'error', 'message': 'timeout aguardando agente'})}\n\n"
+                # Agente ainda rodando — envia keepalive para não fechar a conexão
+                if thread.is_alive():
+                    yield ": keepalive\n\n"
+                    continue
+                # Thread morreu sem enviar sentinel — erro silencioso
+                yield f"data: {json.dumps({'type': 'error', 'message': 'agente encerrou inesperadamente'})}\n\n"
                 break
             if item is _SENTINEL:
                 break
