@@ -27,614 +27,420 @@ HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Obsidian MI Agent</title>
+<title>Obsidian Agent</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
-
   :root {
-    --bg: #0f1117; --surface: #181c27; --surface2: #1e2335;
-    --border: #272d42; --accent: #4f7fff; --green: #22c55e;
-    --yellow: #f59e0b; --text: #e2e8f0; --muted: #64748b; --label: #94a3b8;
+    --bg:#0f1117; --surface:#181c27; --surface2:#1e2335;
+    --border:#272d42; --accent:#4f7fff; --text:#e2e8f0;
+    --muted:#64748b; --label:#94a3b8;
   }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; display: flex; flex-direction: column; }
-
-  header {
-    border-bottom: 1px solid var(--border);
-    padding: 16px 24px;
-    display: flex; align-items: center; justify-content: space-between;
-  }
-  header h1 { font-size: 15px; font-weight: 600; }
-  header span { font-size: 11px; color: var(--muted); font-family: 'JetBrains Mono', monospace; }
-
-  .layout { display: flex; flex: 1; height: calc(100vh - 57px); }
-
-  /* Sidebar */
-  .sidebar {
-    width: 220px; flex-shrink: 0;
-    border-right: 1px solid var(--border);
-    padding: 16px 12px;
-    display: flex; flex-direction: column; gap: 6px;
-  }
-  .sidebar-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.8px; padding: 0 8px; margin: 8px 0 4px; }
-  .action-btn {
-    background: transparent; border: none; color: var(--label);
-    padding: 9px 12px; border-radius: 7px; font-size: 13px;
-    cursor: pointer; text-align: left; font-family: 'Inter', sans-serif;
-    transition: all 0.15s; display: flex; align-items: center; gap: 8px;
-  }
-  .action-btn:hover { background: var(--surface2); color: var(--text); }
-  .action-btn.active { background: var(--accent); color: #fff; }
-
-  /* Main */
-  .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-
-  .chat-area {
-    flex: 1; overflow-y: auto; padding: 24px;
-    display: flex; flex-direction: column; gap: 16px;
-  }
-
-  .msg { display: flex; flex-direction: column; gap: 6px; max-width: 820px; }
-  .msg.user { align-self: flex-end; align-items: flex-end; }
-  .msg.agent { align-self: flex-start; }
-
-  .msg-bubble {
-    padding: 12px 16px; border-radius: 12px; font-size: 14px; line-height: 1.6;
-    white-space: pre-wrap; word-break: break-word;
-  }
-  .msg.user .msg-bubble { background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
-  .msg.agent .msg-bubble { background: var(--surface); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
-
-  .msg-sources { display: flex; gap: 6px; flex-wrap: wrap; }
-  .msg-time { font-size: 10px; color: var(--muted); margin-top: 4px; font-family: 'JetBrains Mono', monospace; }
-  .msg.user .msg-time { text-align: right; }
-  .msg.agent .msg-time { text-align: left; }
-  .source-tag {
-    font-size: 10px; padding: 2px 8px; border-radius: 4px;
-    background: var(--surface2); border: 1px solid var(--border);
-    color: var(--muted); font-family: 'JetBrains Mono', monospace;
-  }
-
-  .typing { display: flex; align-items: center; gap: 8px; padding: 12px 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; border-bottom-left-radius: 4px; width: fit-content; }
-  .typing span { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); animation: bounce 1.2s infinite; }
-  .typing span:nth-child(2) { animation-delay: 0.2s; }
-  .typing span:nth-child(3) { animation-delay: 0.4s; }
-  @keyframes bounce { 0%,60%,100% { transform: translateY(0); } 30% { transform: translateY(-6px); } }
-
-  /* Progress indicator para SSE */
-  .progress-list {
-    padding: 8px 16px; background: var(--surface); border: 1px solid var(--border);
-    border-radius: 12px; border-bottom-left-radius: 4px;
-    display: flex; flex-direction: column; gap: 4px; max-width: 600px;
-  }
-  .progress-item {
-    font-size: 12px; color: var(--muted); font-family: 'JetBrains Mono', monospace;
-    display: flex; align-items: flex-start; gap: 6px;
-  }
-  .progress-item .tool-name {
-    color: var(--accent); font-weight: 500; min-width: 90px; flex-shrink: 0;
-  }
-  .progress-item .tool-detail { color: var(--label); word-break: break-all; }
-
-  .input-area {
-    border-top: 1px solid var(--border);
-    padding: 16px 24px;
-    display: flex; gap: 10px; align-items: flex-end;
-  }
-  .col-filter {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: 6px; padding: 8px 10px; font-size: 12px;
-    color: var(--label); font-family: 'Inter', sans-serif; outline: none;
-  }
-  .col-filter:focus { border-color: var(--accent); }
-  textarea {
-    flex: 1; background: var(--surface); border: 1px solid var(--border);
-    border-radius: 10px; padding: 10px 14px; font-size: 14px;
-    color: var(--text); font-family: 'Inter', sans-serif; outline: none;
-    resize: none; min-height: 44px; max-height: 160px; line-height: 1.5;
-    transition: border-color 0.15s;
-  }
-  textarea:focus { border-color: var(--accent); }
-  .send-btn {
-    background: var(--accent); border: none; color: #fff;
-    padding: 10px 18px; border-radius: 8px; font-size: 14px;
-    cursor: pointer; font-family: 'Inter', sans-serif; font-weight: 500;
-    transition: opacity 0.15s; height: 44px;
-  }
-  .send-btn:hover { opacity: 0.85; }
-  .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-
-  .attach-btn {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: 8px; color: var(--label); width: 44px; height: 44px;
-    font-size: 18px; cursor: pointer; display: flex; align-items: center;
-    justify-content: center; flex-shrink: 0; transition: all 0.15s;
-  }
-  .attach-btn:hover { border-color: var(--accent); color: var(--text); }
-
-  .file-menu {
-    position: absolute; bottom: 72px; left: 16px;
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: 10px; padding: 6px; display: none; flex-direction: column;
-    gap: 4px; z-index: 100; min-width: 200px; box-shadow: 0 4px 20px rgba(0,0,0,.4);
-  }
-  .file-menu.open { display: flex; }
-  .file-menu button {
-    background: transparent; border: none; color: var(--label);
-    padding: 9px 12px; border-radius: 7px; font-size: 13px;
-    cursor: pointer; text-align: left; font-family: 'Inter', sans-serif;
-    display: flex; align-items: center; gap: 8px; transition: all 0.15s;
-  }
-  .file-menu button:hover { background: var(--surface2); color: var(--text); }
-
-  .file-chip {
-    display: inline-flex; align-items: center; gap: 6px;
-    background: var(--surface2); border: 1px solid var(--border);
-    border-radius: 6px; padding: 4px 10px; font-size: 12px;
-    color: var(--label); font-family: 'JetBrains Mono', monospace;
-    margin-bottom: 6px;
-  }
-  .file-chip .remove { cursor: pointer; color: var(--muted); font-size: 14px; line-height: 1; }
-  .file-chip .remove:hover { color: #ef4444; }
-
-  .empty-chat {
-    flex: 1; display: flex; flex-direction: column;
-    align-items: center; justify-content: center; gap: 8px;
-    color: var(--muted); text-align: center; padding: 40px;
-  }
-  .empty-chat .icon { font-size: 40px; margin-bottom: 8px; }
-  .empty-chat h2 { font-size: 16px; color: var(--label); }
-  .empty-chat p { font-size: 13px; max-width: 360px; line-height: 1.6; }
-
-  .scrollbar-thin::-webkit-scrollbar { width: 4px; }
-  .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
-  .scrollbar-thin::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
-
-  .upload-btn {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: 8px; color: var(--label); padding: 9px 12px;
-    font-size: 13px; cursor: pointer; font-family: 'Inter', sans-serif;
-    height: 44px; display: flex; align-items: center; gap: 6px;
-    transition: all 0.15s;
-  }
-  .upload-btn:hover { border-color: var(--accent); color: var(--text); }
-
-  .drop-overlay {
-    position: fixed; inset: 0; background: rgba(79,127,255,.15);
-    border: 2px dashed var(--accent); z-index: 999;
-    display: none; align-items: center; justify-content: center;
-    font-size: 20px; color: var(--accent); pointer-events: none;
-  }
-  .drop-overlay.active { display: flex; }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);height:100vh;display:flex;flex-direction:column}
+  header{border-bottom:1px solid var(--border);padding:14px 20px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+  header h1{font-size:15px;font-weight:600}
+  .scope-wrap{display:flex;align-items:center;gap:8px}
+  .scope-wrap label{font-size:11px;color:var(--muted);font-family:'JetBrains Mono',monospace}
+  #root-select{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:6px 10px;font-size:12px;color:var(--label);font-family:'Inter',sans-serif;outline:none;min-width:140px}
+  #root-select:focus{border-color:var(--accent)}
+  .layout{display:flex;flex:1;overflow:hidden}
+  .sidebar{width:210px;flex-shrink:0;border-right:1px solid var(--border);padding:14px 10px;display:flex;flex-direction:column;gap:4px;overflow-y:auto}
+  .s-label{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;padding:0 8px;margin:10px 0 4px}
+  .s-btn{background:transparent;border:none;color:var(--label);padding:8px 10px;border-radius:7px;font-size:13px;cursor:pointer;text-align:left;font-family:'Inter',sans-serif;width:100%;display:flex;align-items:center;gap:8px}
+  .s-btn:hover{background:var(--surface2);color:var(--text)}
+  .s-btn.active{background:var(--accent);color:#fff}
+  .main{flex:1;display:flex;flex-direction:column;overflow:hidden}
+  .chat{flex:1;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:14px}
+  .chat::-webkit-scrollbar{width:4px}
+  .chat::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+  .empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;color:var(--muted);text-align:center;padding:40px}
+  .empty .icon{font-size:40px;margin-bottom:8px}
+  .empty h2{font-size:16px;color:var(--label)}
+  .empty p{font-size:13px;max-width:340px;line-height:1.6}
+  .msg{display:flex;flex-direction:column;gap:5px;max-width:800px}
+  .msg.user{align-self:flex-end;align-items:flex-end}
+  .msg.agent{align-self:flex-start}
+  .bubble{padding:11px 15px;border-radius:12px;font-size:14px;line-height:1.6;white-space:pre-wrap;word-break:break-word}
+  .msg.user .bubble{background:var(--accent);color:#fff;border-bottom-right-radius:4px}
+  .msg.agent .bubble{background:var(--surface);border:1px solid var(--border);border-bottom-left-radius:4px}
+  .msg-time{font-size:10px;color:var(--muted);font-family:'JetBrains Mono',monospace}
+  .msg.user .msg-time{text-align:right}
+  .sources{display:flex;gap:5px;flex-wrap:wrap}
+  .src-tag{font-size:10px;padding:2px 7px;border-radius:4px;background:var(--surface2);border:1px solid var(--border);color:var(--muted);font-family:'JetBrains Mono',monospace}
+  .typing-wrap{display:flex;align-items:center;gap:8px;padding:11px 15px;background:var(--surface);border:1px solid var(--border);border-radius:12px;border-bottom-left-radius:4px;width:fit-content}
+  .typing-wrap span{width:6px;height:6px;border-radius:50%;background:var(--muted);animation:bounce 1.2s infinite}
+  .typing-wrap span:nth-child(2){animation-delay:.2s}
+  .typing-wrap span:nth-child(3){animation-delay:.4s}
+  @keyframes bounce{0%,60%,100%{transform:translateY(0)}30%{transform:translateY(-6px)}}
+  .prog-list{padding:8px 14px;background:var(--surface);border:1px solid var(--border);border-radius:12px;border-bottom-left-radius:4px;display:flex;flex-direction:column;gap:4px;max-width:580px}
+  .prog-item{font-size:12px;color:var(--muted);font-family:'JetBrains Mono',monospace;display:flex;align-items:flex-start;gap:6px}
+  .prog-item .t-name{color:var(--accent);font-weight:500;min-width:90px;flex-shrink:0}
+  .prog-item .t-detail{color:var(--label);word-break:break-all}
+  .input-wrap{border-top:1px solid var(--border);padding:14px 20px;display:flex;flex-direction:column;gap:6px;flex-shrink:0}
+  .chip-area{display:flex;gap:6px;flex-wrap:wrap}
+  .chip{display:inline-flex;align-items:center;gap:5px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:3px 9px;font-size:12px;color:var(--label);font-family:'JetBrains Mono',monospace}
+  .chip .rm{cursor:pointer;color:var(--muted);margin-left:2px}
+  .chip .rm:hover{color:#ef4444}
+  .input-row{display:flex;gap:8px;align-items:flex-end}
+  textarea{flex:1;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 13px;font-size:14px;color:var(--text);font-family:'Inter',sans-serif;outline:none;resize:none;min-height:44px;max-height:160px;line-height:1.5}
+  textarea:focus{border-color:var(--accent)}
+  .btn-icon{background:var(--surface);border:1px solid var(--border);border-radius:8px;color:var(--label);width:44px;height:44px;font-size:17px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:all .15s}
+  .btn-icon:hover{border-color:var(--accent);color:var(--text)}
+  .btn-send{background:var(--accent);border:none;color:#fff;padding:0 18px;border-radius:8px;font-size:14px;cursor:pointer;font-family:'Inter',sans-serif;font-weight:500;height:44px;white-space:nowrap}
+  .btn-send:hover{opacity:.85}
+  .btn-send:disabled{opacity:.4;cursor:not-allowed}
+  .drop-overlay{position:fixed;inset:0;background:rgba(79,127,255,.15);border:2px dashed var(--accent);z-index:999;display:none;align-items:center;justify-content:center;font-size:20px;color:var(--accent);pointer-events:none}
+  .drop-overlay.active{display:flex}
 </style>
 </head>
 <body>
+
 <div class="drop-overlay" id="drop-overlay">📄 Solte o arquivo para importar</div>
-<input type="file" id="file-input" style="display:none" accept=".pdf,.docx,.txt,.md,.html,.htm,.csv,.zip">
+
+<!-- inputs de arquivo fora de qualquer popover -->
+<input type="file" id="inp-analyze" style="display:none" accept=".pdf,.docx,.txt,.md,.html,.htm,.csv">
+<input type="file" id="inp-ingest"  style="display:none" accept=".pdf,.docx,.txt,.md,.html,.htm,.csv,.zip">
+<input type="file" id="inp-import"  style="display:none" accept=".pdf,.docx,.txt,.md,.html,.htm,.csv,.zip">
 
 <header>
   <h1>🧠 Obsidian Agent</h1>
-  <div style="display:flex;align-items:center;gap:12px">
-    <label style="font-size:11px;color:var(--muted);font-family:'JetBrains Mono',monospace">ESCOPO</label>
-    <select id="root-select" class="col-filter" onchange="onRootChange()" style="min-width:140px;font-size:13px">
+  <div class="scope-wrap">
+    <label>ESCOPO</label>
+    <select id="root-select" onchange="onRootChange()">
       <option value="">🌐 Todo o vault</option>
     </select>
-    <span id="root-badge" style="font-size:10px;color:var(--muted);font-family:'JetBrains Mono',monospace"></span>
   </div>
 </header>
 
 <div class="layout">
   <aside class="sidebar">
-    <div class="sidebar-label">Importar</div>
-    <button class="action-btn" onclick="document.getElementById('file-input').click()">📄 Arquivo (PDF, DOCX…)</button>
-    <button class="action-btn" onclick="promptURL()">🔗 URL / Artigo</button>
-    <div class="sidebar-label">Ações rápidas</div>
-    <button class="action-btn" onclick="runAction('weekly')">📅 Resumo semanal</button>
-    <button class="action-btn" onclick="runAction('insights')">💡 Insights de mercado</button>
-    <button class="action-btn" onclick="runAction('vault-review')">🔗 Revisar vault</button>
-    <div class="sidebar-label">Filtrar por</div>
-    <button class="action-btn" id="f-all"          onclick="setFilter(null, this)">🗂 Tudo</button>
-    <button class="action-btn" id="f-reunioes"     onclick="setFilter('reunioes', this)">📝 Reuniões</button>
-    <button class="action-btn" id="f-projetos"     onclick="setFilter('projetos', this)">📋 Projetos</button>
-    <button class="action-btn" id="f-analises"     onclick="setFilter('analises', this)">📊 Análises</button>
-    <button class="action-btn" id="f-stakeholders" onclick="setFilter('stakeholders', this)">👤 Stakeholders</button>
-    <button class="action-btn" id="f-referencias"  onclick="setFilter('referencias', this)">📚 Referências</button>
+    <div class="s-label">Importar</div>
+    <button class="s-btn" onclick="document.getElementById('inp-import').click()">📄 Arquivo / PDF / ZIP</button>
+    <button class="s-btn" onclick="promptURL()">🔗 URL / Artigo</button>
+    <div class="s-label">Ações rápidas</div>
+    <button class="s-btn" onclick="runAction('weekly')">📅 Resumo semanal</button>
+    <button class="s-btn" onclick="runAction('insights')">💡 Insights de mercado</button>
+    <button class="s-btn" onclick="runAction('vault-review')">🔗 Revisar vault</button>
+    <div class="s-label">Filtrar busca</div>
+    <button class="s-btn active" id="f-all" onclick="setFilter(null,this)">🗂 Tudo</button>
+    <div id="filter-roots"></div>
   </aside>
 
   <div class="main">
-    <div class="chat-area scrollbar-thin" id="chat">
-      <div class="empty-chat" id="empty">
+    <div class="chat scrollbar-thin" id="chat">
+      <div class="empty" id="empty">
         <div class="icon">🔍</div>
         <h2>Pergunte sobre seu vault</h2>
         <p>Use as ações rápidas ou digite uma pergunta. O agente busca nas suas notas e responde com base no contexto real.</p>
       </div>
     </div>
 
-    <div class="input-area" style="flex-direction:column;align-items:stretch;gap:6px">
-      <div id="file-chip-area"></div>
-      <div style="display:flex;gap:10px;align-items:flex-end;position:relative">
-        <!-- Dois inputs separados para evitar conflito de eventos -->
-        <input type="file" id="attach-analyze" style="display:none" accept=".pdf,.docx,.txt,.md,.html,.htm,.csv">
-        <input type="file" id="attach-ingest"  style="display:none" accept=".pdf,.docx,.txt,.md,.html,.htm,.csv,.zip">
-
-        <!-- Botão 📎 abre popover -->
-        <div style="position:relative">
-          <button class="attach-btn" id="attach-btn" title="Anexar arquivo">📎</button>
-          <div id="attach-popover" style="display:none;position:absolute;bottom:52px;left:0;
-               background:var(--surface);border:1px solid var(--border);border-radius:10px;
-               padding:6px;min-width:200px;box-shadow:0 4px 20px rgba(0,0,0,.4);z-index:200">
-            <button onclick="event.stopPropagation();document.getElementById('attach-analyze').click();closePopover()"
-                   style="display:flex;align-items:center;gap:8px;padding:9px 12px;width:100%;
-                   border-radius:7px;font-size:13px;color:var(--label);cursor:pointer;font-family:Inter,sans-serif;
-                   background:none;border:none;"
-                   onmouseover="this.style.background='var(--surface2)'"
-                   onmouseout="this.style.background=''">🔍 Analisar no chat</button>
-            <button onclick="event.stopPropagation();document.getElementById('attach-ingest').click();closePopover()"
-                   style="display:flex;align-items:center;gap:8px;padding:9px 12px;width:100%;
-                   border-radius:7px;font-size:13px;color:var(--label);cursor:pointer;font-family:Inter,sans-serif;
-                   background:none;border:none;"
-                   onmouseover="this.style.background='var(--surface2)'"
-                   onmouseout="this.style.background=''">💾 Salvar no vault</button>
-          </div>
-        </div>
-
-        <textarea id="input" placeholder="Pergunte algo ou anexe um arquivo... (Enter para enviar)"
+    <div class="input-wrap">
+      <div class="chip-area" id="chip-area"></div>
+      <div class="input-row">
+        <button class="btn-icon" title="Analisar arquivo no chat" onclick="document.getElementById('inp-analyze').click()">🔍</button>
+        <button class="btn-icon" title="Salvar arquivo no vault"  onclick="document.getElementById('inp-ingest').click()">📎</button>
+        <textarea id="input" placeholder="Pergunte algo... (Enter envia, Shift+Enter nova linha)"
           onkeydown="handleKey(event)" oninput="autoResize(this)" rows="1"></textarea>
-        <button class="send-btn" id="send-btn" onclick="sendMessage()">Enviar</button>
+        <button class="btn-send" id="send-btn" onclick="sendMessage()">Enviar</button>
       </div>
     </div>
   </div>
 </div>
 
 <script>
-  let activeFilter  = null;
-  let activeRoot    = null;
-  let attachedFile  = null;   // { file: File, mode: 'analyze'|'ingest' }
+  var activeFilter = null;
+  var activeRoot   = null;
+  var attachedFile = null; // {file, mode:'analyze'|'ingest'}
 
-  // ── Attach popover ────────────────────────────────────────────────────────
-  document.getElementById('attach-btn').addEventListener('click', e => {
-    e.stopPropagation();
-    const pop = document.getElementById('attach-popover');
-    pop.style.display = pop.style.display === 'none' ? 'block' : 'none';
-  });
-  document.addEventListener('click', () => {
-    document.getElementById('attach-popover').style.display = 'none';
-  });
-  function closePopover() {
-    setTimeout(() => { document.getElementById('attach-popover').style.display = 'none'; }, 50);
-  }
-
-  document.getElementById('attach-analyze').addEventListener('change', e => {
-    const file = e.target.files[0];
-    if (!file) return;
+  // ── File inputs ─────────────────────────────────────────────────────────────
+  document.getElementById('inp-analyze').addEventListener('change', function(e) {
+    var f = e.target.files[0]; if (!f) return;
     e.target.value = '';
-    attachedFile = { file, mode: 'analyze' };
-    renderFileChip(file.name, 'analyze');
+    attachedFile = {file: f, mode: 'analyze'};
+    renderChip(f.name, 'analyze');
   });
-  document.getElementById('attach-ingest').addEventListener('change', e => {
-    const file = e.target.files[0];
-    if (!file) return;
+  document.getElementById('inp-ingest').addEventListener('change', function(e) {
+    var f = e.target.files[0]; if (!f) return;
     e.target.value = '';
-    attachedFile = { file, mode: 'ingest' };
-    renderFileChip(file.name, 'ingest');
+    attachedFile = {file: f, mode: 'ingest'};
+    renderChip(f.name, 'ingest');
+  });
+  document.getElementById('inp-import').addEventListener('change', function(e) {
+    var f = e.target.files[0]; if (!f) return;
+    e.target.value = '';
+    uploadFile(f);
   });
 
-  function renderFileChip(name, mode) {
-    const area = document.getElementById('file-chip-area');
-    const label = mode === 'analyze' ? '🔍 analisar' : '💾 vault';
-    area.innerHTML = `<div class="file-chip">📎 ${name} <span style="color:var(--accent);margin-left:4px">${label}</span><span class="remove" onclick="clearAttach()">×</span></div>`;
+  function renderChip(name, mode) {
+    var lbl = mode === 'analyze' ? '🔍 analisar' : '💾 vault';
+    document.getElementById('chip-area').innerHTML =
+      '<div class="chip">📎 ' + name + ' <span style="color:var(--accent)">' + lbl + '</span>' +
+      '<span class="rm" onclick="clearAttach()">×</span></div>';
   }
-
   function clearAttach() {
     attachedFile = null;
-    document.getElementById('file-chip-area').innerHTML = '';
+    document.getElementById('chip-area').innerHTML = '';
   }
 
-  // ── Root selector ─────────────────────────────────────────────────────────
+  // ── Roots ───────────────────────────────────────────────────────────────────
+  function onRootChange() {
+    activeRoot = document.getElementById('root-select').value || null;
+  }
+  function getRoot() { return activeRoot; }
+
   async function loadRoots() {
     try {
-      const r = await fetch('/api/roots');
-      const data = await r.json();
-      const sel = document.getElementById('root-select');
-      data.roots.forEach(root => {
-        const opt = document.createElement('option');
+      var r    = await fetch('/api/roots');
+      var data = await r.json();
+      var roots = data.roots || [];
+
+      // Se ainda vazio, tenta vault-stats para extrair raízes dos IDs
+      if (roots.length === 0) {
+        var r2   = await fetch('/api/vault-stats');
+        var d2   = await r2.json();
+        var ids  = d2.active_note_ids || [];
+        var seen = {};
+        ids.forEach(function(id) {
+          var parts = id.split('/');
+          if (parts.length > 1) seen[parts[0]] = true;
+        });
+        roots = Object.keys(seen).sort();
+      }
+
+      var sel  = document.getElementById('root-select');
+      var filt = document.getElementById('filter-roots');
+      roots.forEach(function(root) {
+        var opt = document.createElement('option');
         opt.value = root;
         opt.textContent = '📁 ' + root;
         sel.appendChild(opt);
+
+        var btn = document.createElement('button');
+        btn.className = 's-btn';
+        btn.id = 'f-' + root;
+        btn.textContent = '📁 ' + root;
+        btn.onclick = function() { setFilter(root, btn); };
+        filt.appendChild(btn);
       });
-    } catch(e) { console.warn('Erro ao carregar raízes', e); }
+    } catch(e) { console.warn('loadRoots error', e); }
   }
-
-  function onRootChange() {
-    const sel = document.getElementById('root-select');
-    activeRoot = sel.value || null;
-    const badge = document.getElementById('root-badge');
-    badge.textContent = activeRoot ? `isolado em "${activeRoot}"` : '';
-  }
-
-  function getRoot() { return activeRoot; }
 
   function setFilter(col, el) {
     activeFilter = col;
-    document.querySelectorAll('.sidebar .action-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.sidebar .s-btn').forEach(function(b) { b.classList.remove('active'); });
     el.classList.add('active');
-    document.getElementById('col-select').value = col || '';
   }
 
+  // ── UI helpers ───────────────────────────────────────────────────────────────
   function autoResize(el) {
     el.style.height = 'auto';
     el.style.height = Math.min(el.scrollHeight, 160) + 'px';
   }
-
   function handleKey(e) {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
   }
-
-  function _fmtTime() {
-    const now = new Date();
-    return now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+  function fmtTime() {
+    return new Date().toLocaleTimeString('pt-BR', {hour:'2-digit', minute:'2-digit'});
   }
-
   function appendMsg(role, content, sources) {
-    const chat = document.getElementById('chat');
-    document.getElementById('empty')?.remove();
+    var chat = document.getElementById('chat');
+    var emp  = document.getElementById('empty');
+    if (emp) emp.remove();
 
-    const div = document.createElement('div');
-    div.className = `msg ${role}`;
-
-    const bubble = document.createElement('div');
-    bubble.className = 'msg-bubble';
+    var div    = document.createElement('div');
+    div.className = 'msg ' + role;
+    var bubble = document.createElement('div');
+    bubble.className = 'bubble';
     bubble.textContent = content;
     div.appendChild(bubble);
 
     if (sources && sources.length) {
-      const src = document.createElement('div');
-      src.className = 'msg-sources';
-      sources.forEach(s => {
-        const tag = document.createElement('span');
-        tag.className = 'source-tag';
+      var src = document.createElement('div');
+      src.className = 'sources';
+      sources.forEach(function(s) {
+        var tag = document.createElement('span');
+        tag.className = 'src-tag';
         tag.textContent = s.split('/').pop();
         tag.title = s;
         src.appendChild(tag);
       });
       div.appendChild(src);
     }
-
-    const ts = document.createElement('div');
+    var ts = document.createElement('div');
     ts.className = 'msg-time';
-    ts.textContent = _fmtTime();
+    ts.textContent = fmtTime();
     div.appendChild(ts);
-
     chat.appendChild(div);
     chat.scrollTop = chat.scrollHeight;
     return div;
   }
-
   function appendTyping() {
-    const chat = document.getElementById('chat');
-    const div = document.createElement('div');
+    var chat = document.getElementById('chat');
+    var div  = document.createElement('div');
     div.className = 'msg agent';
-    div.id = 'typing-indicator';
-    div.innerHTML = '<div class="typing"><span></span><span></span><span></span></div>';
+    div.id = 'typing';
+    div.innerHTML = '<div class="typing-wrap"><span></span><span></span><span></span></div>';
     chat.appendChild(div);
     chat.scrollTop = chat.scrollHeight;
   }
+  function removeTyping() { var el = document.getElementById('typing'); if(el) el.remove(); }
 
-  function removeTyping() {
-    document.getElementById('typing-indicator')?.remove();
-  }
-
-  // ── SSE progress panel ────────────────────────────────────────────────────
-  function createProgressPanel() {
-    const chat = document.getElementById('chat');
-    document.getElementById('empty')?.remove();
-    const div = document.createElement('div');
-    div.className = 'msg agent';
-    div.id = 'progress-panel';
-    const list = document.createElement('div');
-    list.className = 'progress-list';
+  function createProgPanel() {
+    var chat = document.getElementById('chat');
+    var emp  = document.getElementById('empty'); if(emp) emp.remove();
+    var div  = document.createElement('div');
+    div.className = 'msg agent'; div.id = 'prog-panel';
+    var list = document.createElement('div');
+    list.className = 'prog-list';
     div.appendChild(list);
     chat.appendChild(div);
     chat.scrollTop = chat.scrollHeight;
     return list;
   }
-
-  function addProgressItem(list, tool, detail) {
-    const item = document.createElement('div');
-    item.className = 'progress-item';
-    item.innerHTML = `<span class="tool-name">${tool}</span><span class="tool-detail">${detail}</span>`;
+  function addProgItem(list, tool, detail) {
+    var item = document.createElement('div');
+    item.className = 'prog-item';
+    item.innerHTML = '<span class="t-name">' + tool + '</span><span class="t-detail">' + (detail||'') + '</span>';
     list.appendChild(item);
-    const chat = document.getElementById('chat');
-    chat.scrollTop = chat.scrollHeight;
+    document.getElementById('chat').scrollTop = 99999;
   }
+  function removeProgPanel() { var el = document.getElementById('prog-panel'); if(el) el.remove(); }
 
-  function removeProgressPanel() {
-    document.getElementById('progress-panel')?.remove();
-  }
-
+  // ── Send ─────────────────────────────────────────────────────────────────────
   async function sendMessage() {
-    const input   = document.getElementById('input');
-    const q       = input.value.trim();
-    const hasFile = attachedFile !== null;
+    var input   = document.getElementById('input');
+    var q       = input.value.trim();
+    var hasFile = attachedFile !== null;
     if (!q && !hasFile) return;
 
-    const col = document.getElementById('col-select').value;
     input.value = '';
     input.style.height = 'auto';
     document.getElementById('send-btn').disabled = true;
 
-    const userLabel = hasFile ? `📎 ${attachedFile.file.name}${q ? '\n' + q : ''}` : q;
+    var userLabel = hasFile ? ('📎 ' + attachedFile.file.name + (q ? '\n' + q : '')) : q;
     appendMsg('user', userLabel);
 
-    // Se há arquivo para salvar no vault, usa upload normal
+    // Salvar arquivo no vault
     if (hasFile && attachedFile.mode === 'ingest') {
-      const fileSnap = attachedFile;
-      clearAttach();
+      var snap = attachedFile; clearAttach();
       appendTyping();
-      const form = new FormData();
-      form.append('file', fileSnap.file);
+      var form = new FormData();
+      form.append('file', snap.file);
       if (getRoot()) form.append('root', getRoot());
       try {
-        const r = await fetch('/api/upload', { method: 'POST', body: form });
-        const data = await r.json();
+        var r = await fetch('/api/upload', {method:'POST', body:form});
+        var d = await r.json();
         removeTyping();
-        appendMsg('agent', data.answer, data.sources);
-      } catch(e) {
-        removeTyping();
-        appendMsg('agent', '❌ Erro ao importar arquivo.');
-      }
+        appendMsg('agent', d.answer, d.sources);
+      } catch(e) { removeTyping(); appendMsg('agent', '❌ Erro ao importar arquivo.'); }
       document.getElementById('send-btn').disabled = false;
-      input.focus();
-      return;
+      input.focus(); return;
     }
 
-    // Análise inline ou pergunta normal (SSE)
-    let requestInit, url;
+    // Análise de arquivo ou pergunta normal (SSE)
+    var url, init;
     if (hasFile && attachedFile.mode === 'analyze') {
-      const fileSnap = attachedFile;
-      clearAttach();
-      const form = new FormData();
-      form.append('file', fileSnap.file);
+      var snap = attachedFile; clearAttach();
+      var form = new FormData();
+      form.append('file', snap.file);
       if (q) form.append('question', q);
       if (getRoot()) form.append('root', getRoot());
-      url = '/api/analyze/stream';
-      requestInit = { method: 'POST', body: form };
+      url = '/api/analyze/stream'; init = {method:'POST', body:form};
     } else {
-      const body = { question: q };
-      if (col) body.collections = [col];
+      var body = {question: q};
+      if (activeFilter) body.collections = [activeFilter];
       if (getRoot()) body.root = getRoot();
       url = '/api/ask/stream';
-      requestInit = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
+      init = {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)};
     }
 
-    let progressList = null;
+    var progList = null;
     try {
-      const response = await fetch(url, requestInit);
-
-      if (!response.ok) throw new Error('SSE request failed');
-
-      progressList = createProgressPanel();
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-
+      var resp = await fetch(url, init);
+      if (!resp.ok) throw new Error('http ' + resp.status);
+      progList = createProgPanel();
+      var reader  = resp.body.getReader();
+      var decoder = new TextDecoder();
+      var buf     = '';
       while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\\n');
-        buffer = lines.pop(); // guarda linha incompleta
-
-        for (const line of lines) {
-          if (line.startsWith(': ')) continue; // keepalive — ignora
+        var chunk = await reader.read();
+        if (chunk.done) break;
+        buf += decoder.decode(chunk.value, {stream:true});
+        var lines = buf.split('\n');
+        buf = lines.pop();
+        for (var i = 0; i < lines.length; i++) {
+          var line = lines[i];
           if (!line.startsWith('data: ')) continue;
           try {
-            const evt = JSON.parse(line.slice(6));
-            if (evt.type === 'progress') {
-              addProgressItem(progressList, evt.tool, evt.detail || '');
-            } else if (evt.type === 'done') {
-              removeProgressPanel();
-              appendMsg('agent', evt.answer, evt.sources);
-            } else if (evt.type === 'error') {
-              removeProgressPanel();
-              appendMsg('agent', '❌ ' + evt.message);
-            }
-          } catch(e) { /* ignora linhas malformadas */ }
+            var evt = JSON.parse(line.slice(6));
+            if (evt.type === 'progress') { addProgItem(progList, evt.tool, evt.detail); }
+            else if (evt.type === 'done')  { removeProgPanel(); appendMsg('agent', evt.answer, evt.sources); }
+            else if (evt.type === 'error') { removeProgPanel(); appendMsg('agent', '❌ ' + evt.message); }
+          } catch(e) {}
         }
       }
-    } catch (e) {
-      removeProgressPanel();
-      removeTyping();
-      appendMsg('agent', '❌ Erro ao consultar o agente. Verifique os logs.');
+    } catch(e) {
+      removeProgPanel(); removeTyping();
+      appendMsg('agent', '❌ Erro de conexão com o agente. Verifique os logs.');
     }
-
     document.getElementById('send-btn').disabled = false;
     input.focus();
   }
 
-  loadRoots();
-
-  // ── Upload ────────────────────────────────────────────────────────────────
-  document.getElementById('file-input').addEventListener('change', async e => {
-    const file = e.target.files[0];
-    if (!file) return;
-    e.target.value = '';
-    await uploadFile(file);
-  });
-
-  document.addEventListener('dragover', e => { e.preventDefault(); document.getElementById('drop-overlay').classList.add('active'); });
-  document.addEventListener('dragleave', e => { if (!e.relatedTarget) document.getElementById('drop-overlay').classList.remove('active'); });
-  document.addEventListener('drop', async e => {
-    e.preventDefault();
-    document.getElementById('drop-overlay').classList.remove('active');
-    const file = e.dataTransfer.files[0];
-    if (file) await uploadFile(file);
-  });
-
+  // ── Upload direto (sidebar / drag-drop) ─────────────────────────────────────
   async function uploadFile(file) {
-    const isZip = file.name.toLowerCase().endsWith('.zip');
-    appendMsg('user', `${isZip ? '🗜' : '📄'} Importando: ${file.name}${getRoot() ? ` → ${getRoot()}/` : ''}`);
+    appendMsg('user', (file.name.endsWith('.zip') ? '🗜 ' : '📄 ') + 'Importando: ' + file.name);
     appendTyping();
     document.getElementById('send-btn').disabled = true;
-    const form = new FormData();
+    var form = new FormData();
     form.append('file', file);
     if (getRoot()) form.append('root', getRoot());
     try {
-      const r = await fetch('/api/upload', { method: 'POST', body: form });
-      const data = await r.json();
-      removeTyping();
-      appendMsg('agent', data.answer, data.sources);
-    } catch(e) {
-      removeTyping();
-      appendMsg('agent', '❌ Erro ao importar arquivo.');
-    }
+      var r = await fetch('/api/upload', {method:'POST', body:form});
+      var d = await r.json();
+      removeTyping(); appendMsg('agent', d.answer, d.sources);
+    } catch(e) { removeTyping(); appendMsg('agent', '❌ Erro ao importar.'); }
     document.getElementById('send-btn').disabled = false;
   }
 
   async function promptURL() {
-    const url = prompt('Cole a URL do artigo ou página:');
+    var url = prompt('Cole a URL do artigo ou página:');
     if (!url || !url.startsWith('http')) return;
-    appendMsg('user', `🔗 Importando URL: ${url}${getRoot() ? ` → ${getRoot()}/` : ''}`);
+    appendMsg('user', '🔗 ' + url);
     appendTyping();
     document.getElementById('send-btn').disabled = true;
     try {
-      const r = await fetch('/api/upload-url', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, root: getRoot() })
-      });
-      const data = await r.json();
-      removeTyping();
-      appendMsg('agent', data.answer, data.sources);
-    } catch(e) {
-      removeTyping();
-      appendMsg('agent', '❌ Erro ao importar URL.');
-    }
+      var r = await fetch('/api/upload-url', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url:url, root:getRoot()})});
+      var d = await r.json();
+      removeTyping(); appendMsg('agent', d.answer, d.sources);
+    } catch(e) { removeTyping(); appendMsg('agent', '❌ Erro ao importar URL.'); }
     document.getElementById('send-btn').disabled = false;
   }
 
   async function runAction(action) {
-    document.getElementById('send-btn').disabled = true;
-    const labels = { weekly: '📅 Resumo semanal', insights: '💡 Insights de mercado', 'vault-review': '🔗 Revisar vault' };
-    const rootLabel = getRoot() ? ` (${getRoot()})` : '';
-    appendMsg('user', labels[action] + rootLabel);
+    var labels = {weekly:'📅 Resumo semanal', insights:'💡 Insights de mercado', 'vault-review':'🔗 Revisar vault'};
+    appendMsg('user', labels[action] + (getRoot() ? ' (' + getRoot() + ')' : ''));
     appendTyping();
-
+    document.getElementById('send-btn').disabled = true;
     try {
-      const r = await fetch(`/api/${action}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ root: getRoot() }),
-      });
-      const data = await r.json();
-      removeTyping();
-      appendMsg('agent', data.answer, data.sources);
-    } catch (e) {
-      removeTyping();
-      appendMsg('agent', '❌ Erro ao executar ação.');
-    }
+      var r = await fetch('/api/' + action, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({root:getRoot()})});
+      var d = await r.json();
+      removeTyping(); appendMsg('agent', d.answer, d.sources);
+    } catch(e) { removeTyping(); appendMsg('agent', '❌ Erro ao executar ação.'); }
     document.getElementById('send-btn').disabled = false;
   }
+
+  // ── Drag & drop ──────────────────────────────────────────────────────────────
+  document.addEventListener('dragover', function(e) { e.preventDefault(); document.getElementById('drop-overlay').classList.add('active'); });
+  document.addEventListener('dragleave', function(e) { if (!e.relatedTarget) document.getElementById('drop-overlay').classList.remove('active'); });
+  document.addEventListener('drop', function(e) {
+    e.preventDefault();
+    document.getElementById('drop-overlay').classList.remove('active');
+    var f = e.dataTransfer.files[0]; if (f) uploadFile(f);
+  });
+
+  loadRoots();
 </script>
 </body>
 </html>
