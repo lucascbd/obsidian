@@ -144,6 +144,39 @@ HTML = """<!DOCTYPE html>
   .send-btn:hover { opacity: 0.85; }
   .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
+  .attach-btn {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; color: var(--label); width: 44px; height: 44px;
+    font-size: 18px; cursor: pointer; display: flex; align-items: center;
+    justify-content: center; flex-shrink: 0; transition: all 0.15s;
+  }
+  .attach-btn:hover { border-color: var(--accent); color: var(--text); }
+
+  .file-menu {
+    position: absolute; bottom: 72px; left: 16px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 6px; display: none; flex-direction: column;
+    gap: 4px; z-index: 100; min-width: 200px; box-shadow: 0 4px 20px rgba(0,0,0,.4);
+  }
+  .file-menu.open { display: flex; }
+  .file-menu button {
+    background: transparent; border: none; color: var(--label);
+    padding: 9px 12px; border-radius: 7px; font-size: 13px;
+    cursor: pointer; text-align: left; font-family: 'Inter', sans-serif;
+    display: flex; align-items: center; gap: 8px; transition: all 0.15s;
+  }
+  .file-menu button:hover { background: var(--surface2); color: var(--text); }
+
+  .file-chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 4px 10px; font-size: 12px;
+    color: var(--label); font-family: 'JetBrains Mono', monospace;
+    margin-bottom: 6px;
+  }
+  .file-chip .remove { cursor: pointer; color: var(--muted); font-size: 14px; line-height: 1; }
+  .file-chip .remove:hover { color: #ef4444; }
+
   .empty-chat {
     flex: 1; display: flex; flex-direction: column;
     align-items: center; justify-content: center; gap: 8px;
@@ -217,26 +250,64 @@ HTML = """<!DOCTYPE html>
       </div>
     </div>
 
-    <div class="input-area">
-      <select class="col-filter" id="col-select">
-        <option value="">Todas as coleções</option>
-        <option value="reunioes">Reuniões</option>
-        <option value="projetos">Projetos</option>
-        <option value="analises">Análises</option>
-        <option value="stakeholders">Stakeholders</option>
-        <option value="referencias">Referências</option>
-        <option value="inbox">Inbox</option>
-      </select>
-      <textarea id="input" placeholder="Pergunte algo sobre seu vault... (Enter para enviar)"
-        onkeydown="handleKey(event)" oninput="autoResize(this)" rows="1"></textarea>
-      <button class="send-btn" id="send-btn" onclick="sendMessage()">Enviar</button>
+    <div style="position:relative">
+      <div class="file-menu" id="file-menu">
+        <button onclick="triggerAttach('analyze')">🔍 Analisar no chat</button>
+        <button onclick="triggerAttach('ingest')">💾 Salvar no vault</button>
+      </div>
+    </div>
+
+    <div class="input-area" style="flex-direction:column;align-items:stretch;gap:6px">
+      <div id="file-chip-area"></div>
+      <div style="display:flex;gap:10px;align-items:flex-end">
+        <input type="file" id="attach-input" style="display:none" accept=".pdf,.docx,.txt,.md,.html,.htm,.csv">
+        <button class="attach-btn" onclick="toggleFileMenu(event)" title="Anexar arquivo">📎</button>
+        <textarea id="input" placeholder="Pergunte algo ou anexe um arquivo... (Enter para enviar)"
+          onkeydown="handleKey(event)" oninput="autoResize(this)" rows="1"></textarea>
+        <button class="send-btn" id="send-btn" onclick="sendMessage()">Enviar</button>
+      </div>
     </div>
   </div>
 </div>
 
 <script>
-  let activeFilter = null;
-  let activeRoot   = null;
+  let activeFilter  = null;
+  let activeRoot    = null;
+  let attachedFile  = null;   // { file: File, mode: 'analyze'|'ingest' }
+
+  // ── Attach menu ───────────────────────────────────────────────────────────
+  function toggleFileMenu(e) {
+    e.stopPropagation();
+    document.getElementById('file-menu').classList.toggle('open');
+  }
+  document.addEventListener('click', () => document.getElementById('file-menu').classList.remove('open'));
+
+  function triggerAttach(mode) {
+    document.getElementById('file-menu').classList.remove('open');
+    const inp = document.getElementById('attach-input');
+    inp.dataset.mode = mode;
+    inp.click();
+  }
+
+  document.getElementById('attach-input').addEventListener('change', e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    e.target.value = '';
+    const mode = e.target.dataset.mode || 'analyze';
+    attachedFile = { file, mode };
+    renderFileChip(file.name, mode);
+  });
+
+  function renderFileChip(name, mode) {
+    const area = document.getElementById('file-chip-area');
+    const label = mode === 'analyze' ? '🔍 analisar' : '💾 vault';
+    area.innerHTML = `<div class="file-chip">📎 ${name} <span style="color:var(--accent);margin-left:4px">${label}</span><span class="remove" onclick="clearAttach()">×</span></div>`;
+  }
+
+  function clearAttach() {
+    attachedFile = null;
+    document.getElementById('file-chip-area').innerHTML = '';
+  }
 
   // ── Root selector ─────────────────────────────────────────────────────────
   async function loadRoots() {
@@ -361,29 +432,63 @@ HTML = """<!DOCTYPE html>
   }
 
   async function sendMessage() {
-    const input = document.getElementById('input');
-    const q = input.value.trim();
-    if (!q) return;
+    const input   = document.getElementById('input');
+    const q       = input.value.trim();
+    const hasFile = attachedFile !== null;
+    if (!q && !hasFile) return;
 
     const col = document.getElementById('col-select').value;
     input.value = '';
     input.style.height = 'auto';
     document.getElementById('send-btn').disabled = true;
 
-    appendMsg('user', q);
+    const userLabel = hasFile ? `📎 ${attachedFile.file.name}${q ? '\n' + q : ''}` : q;
+    appendMsg('user', userLabel);
 
-    const body = { question: q };
-    if (col) body.collections = [col];
-    if (getRoot()) body.root = getRoot();
+    // Se há arquivo para salvar no vault, usa upload normal
+    if (hasFile && attachedFile.mode === 'ingest') {
+      const fileSnap = attachedFile;
+      clearAttach();
+      appendTyping();
+      const form = new FormData();
+      form.append('file', fileSnap.file);
+      if (getRoot()) form.append('root', getRoot());
+      try {
+        const r = await fetch('/api/upload', { method: 'POST', body: form });
+        const data = await r.json();
+        removeTyping();
+        appendMsg('agent', data.answer, data.sources);
+      } catch(e) {
+        removeTyping();
+        appendMsg('agent', '❌ Erro ao importar arquivo.');
+      }
+      document.getElementById('send-btn').disabled = false;
+      input.focus();
+      return;
+    }
 
-    // Usa SSE streaming
+    // Análise inline ou pergunta normal (SSE)
+    let requestInit, url;
+    if (hasFile && attachedFile.mode === 'analyze') {
+      const fileSnap = attachedFile;
+      clearAttach();
+      const form = new FormData();
+      form.append('file', fileSnap.file);
+      if (q) form.append('question', q);
+      if (getRoot()) form.append('root', getRoot());
+      url = '/api/analyze/stream';
+      requestInit = { method: 'POST', body: form };
+    } else {
+      const body = { question: q };
+      if (col) body.collections = [col];
+      if (getRoot()) body.root = getRoot();
+      url = '/api/ask/stream';
+      requestInit = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
+    }
+
     let progressList = null;
     try {
-      const response = await fetch('/api/ask/stream', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      });
+      const response = await fetch(url, requestInit);
 
       if (!response.ok) throw new Error('SSE request failed');
 
@@ -653,6 +758,90 @@ def api_ask_stream():
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+@app.route("/api/analyze/stream", methods=["POST"])
+def api_analyze_stream():
+    """Extrai texto do arquivo enviado e passa para o agente analisar via SSE."""
+    from agent import _extract_text_from_file, ask as agent_ask
+
+    if "file" not in request.files:
+        def _err():
+            yield f"data: {json.dumps({'type':'error','message':'arquivo obrigatório'})}\n\n"
+        return Response(stream_with_context(_err()), mimetype="text/event-stream")
+
+    f        = request.files["file"]
+    question = request.form.get("question", "").strip()
+    root     = request.form.get("root") or None
+    content  = f.read()
+
+    try:
+        raw_text = _extract_text_from_file(f.filename, content)
+    except Exception as e:
+        def _err():
+            yield f"data: {json.dumps({'type':'error','message':f'Erro ao extrair texto: {e}'})}\n\n"
+        return Response(stream_with_context(_err()), mimetype="text/event-stream")
+
+    if not raw_text.strip():
+        def _err():
+            yield f"data: {json.dumps({'type':'error','message':'Não foi possível extrair texto do arquivo.'})}\n\n"
+        return Response(stream_with_context(_err()), mimetype="text/event-stream")
+
+    instruction = (
+        f"O usuário enviou o arquivo **{f.filename}** com o seguinte conteúdo:\n\n"
+        f"```\n{raw_text[:12000]}\n```\n\n"
+    )
+    if question:
+        instruction += f"Pergunta do usuário: {question}"
+    else:
+        instruction += (
+            "Analise este documento e forneça:\n"
+            "1. Resumo dos pontos principais\n"
+            "2. Insights relevantes\n"
+            "3. Possíveis conexões com notas do vault (use search_vault para verificar)\n"
+            "4. Sugestão de onde salvar no vault caso o usuário queira"
+        )
+
+    q: queue.Queue = queue.Queue()
+    _SENTINEL = object()
+
+    def _on_progress(event: dict):
+        tool   = event.get("tool", "")
+        args   = event.get("args", {})
+        detail = args.get("query", args.get("note_id", ""))[:80]
+        q.put({"type": "progress", "tool": tool, "detail": detail})
+
+    def _run():
+        try:
+            result = agent_ask(instruction, root=root, on_progress=_on_progress)
+            q.put({"type": "done", "answer": result.get("answer", ""), "sources": result.get("sources", [])})
+        except Exception as e:
+            q.put({"type": "error", "message": str(e)})
+        finally:
+            q.put(_SENTINEL)
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+
+    def _generate():
+        while True:
+            try:
+                item = q.get(timeout=30)
+            except queue.Empty:
+                if thread.is_alive():
+                    yield ": keepalive\n\n"
+                    continue
+                yield f"data: {json.dumps({'type':'error','message':'agente encerrou inesperadamente'})}\n\n"
+                break
+            if item is _SENTINEL:
+                break
+            yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+
+    return Response(
+        stream_with_context(_generate()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
