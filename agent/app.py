@@ -250,18 +250,32 @@ HTML = """<!DOCTYPE html>
       </div>
     </div>
 
-    <div style="position:relative">
-      <div class="file-menu" id="file-menu">
-        <button onclick="triggerAttach('analyze')">🔍 Analisar no chat</button>
-        <button onclick="triggerAttach('ingest')">💾 Salvar no vault</button>
-      </div>
-    </div>
-
     <div class="input-area" style="flex-direction:column;align-items:stretch;gap:6px">
       <div id="file-chip-area"></div>
-      <div style="display:flex;gap:10px;align-items:flex-end">
-        <input type="file" id="attach-input" style="display:none" accept=".pdf,.docx,.txt,.md,.html,.htm,.csv">
-        <button class="attach-btn" onclick="toggleFileMenu(event)" title="Anexar arquivo">📎</button>
+      <div style="display:flex;gap:10px;align-items:flex-end;position:relative">
+        <!-- Dois inputs separados para evitar conflito de eventos -->
+        <input type="file" id="attach-analyze" style="display:none" accept=".pdf,.docx,.txt,.md,.html,.htm,.csv">
+        <input type="file" id="attach-ingest"  style="display:none" accept=".pdf,.docx,.txt,.md,.html,.htm,.csv,.zip">
+
+        <!-- Botão 📎 abre popover -->
+        <div style="position:relative">
+          <button class="attach-btn" id="attach-btn" title="Anexar arquivo">📎</button>
+          <div id="attach-popover" style="display:none;position:absolute;bottom:52px;left:0;
+               background:var(--surface);border:1px solid var(--border);border-radius:10px;
+               padding:6px;min-width:200px;box-shadow:0 4px 20px rgba(0,0,0,.4);z-index:200">
+            <label for="attach-analyze" style="display:flex;align-items:center;gap:8px;padding:9px 12px;
+                   border-radius:7px;font-size:13px;color:var(--label);cursor:pointer;font-family:Inter,sans-serif"
+                   onmouseover="this.style.background='var(--surface2)'"
+                   onmouseout="this.style.background=''"
+                   onclick="closePopover()">🔍 Analisar no chat</label>
+            <label for="attach-ingest" style="display:flex;align-items:center;gap:8px;padding:9px 12px;
+                   border-radius:7px;font-size:13px;color:var(--label);cursor:pointer;font-family:Inter,sans-serif"
+                   onmouseover="this.style.background='var(--surface2)'"
+                   onmouseout="this.style.background=''"
+                   onclick="closePopover()">💾 Salvar no vault</label>
+          </div>
+        </div>
+
         <textarea id="input" placeholder="Pergunte algo ou anexe um arquivo... (Enter para enviar)"
           onkeydown="handleKey(event)" oninput="autoResize(this)" rows="1"></textarea>
         <button class="send-btn" id="send-btn" onclick="sendMessage()">Enviar</button>
@@ -275,27 +289,32 @@ HTML = """<!DOCTYPE html>
   let activeRoot    = null;
   let attachedFile  = null;   // { file: File, mode: 'analyze'|'ingest' }
 
-  // ── Attach menu ───────────────────────────────────────────────────────────
-  function toggleFileMenu(e) {
+  // ── Attach popover ────────────────────────────────────────────────────────
+  document.getElementById('attach-btn').addEventListener('click', e => {
     e.stopPropagation();
-    document.getElementById('file-menu').classList.toggle('open');
+    const pop = document.getElementById('attach-popover');
+    pop.style.display = pop.style.display === 'none' ? 'block' : 'none';
+  });
+  document.addEventListener('click', () => {
+    document.getElementById('attach-popover').style.display = 'none';
+  });
+  function closePopover() {
+    setTimeout(() => { document.getElementById('attach-popover').style.display = 'none'; }, 50);
   }
-  document.addEventListener('click', () => document.getElementById('file-menu').classList.remove('open'));
 
-  function triggerAttach(mode) {
-    document.getElementById('file-menu').classList.remove('open');
-    const inp = document.getElementById('attach-input');
-    inp.dataset.mode = mode;
-    inp.click();
-  }
-
-  document.getElementById('attach-input').addEventListener('change', e => {
+  document.getElementById('attach-analyze').addEventListener('change', e => {
     const file = e.target.files[0];
     if (!file) return;
     e.target.value = '';
-    const mode = e.target.dataset.mode || 'analyze';
-    attachedFile = { file, mode };
-    renderFileChip(file.name, mode);
+    attachedFile = { file, mode: 'analyze' };
+    renderFileChip(file.name, 'analyze');
+  });
+  document.getElementById('attach-ingest').addEventListener('change', e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    e.target.value = '';
+    attachedFile = { file, mode: 'ingest' };
+    renderFileChip(file.name, 'ingest');
   });
 
   function renderFileChip(name, mode) {
@@ -627,7 +646,18 @@ def index():
 
 @app.route("/api/roots", methods=["GET"])
 def api_roots():
-    return jsonify({"roots": get_root_folders()})
+    roots = get_root_folders()
+    # Fallback: usa coleções do ChromaDB se CouchDB retornar vazio
+    if not roots:
+        try:
+            import chromadb as _chroma
+            from agent import CHROMA_HOST, CHROMA_PORT
+            client = _chroma.HttpClient(host=CHROMA_HOST, port=CHROMA_PORT)
+            roots = sorted(c.name for c in client.list_collections())
+        except Exception:
+            pass
+    log.info(f"api_roots: {roots}")
+    return jsonify({"roots": roots})
 
 
 @app.route("/api/vault-stats", methods=["GET"])
