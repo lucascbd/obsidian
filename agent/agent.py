@@ -202,7 +202,11 @@ def load_settings(root: str) -> dict:
 def save_session_memory(root: str, question: str, answer: str, sources: list, actions_summary: str) -> None:
     """Faz append em {root}/00-settings/agent-mem.md com o resumo da sessão."""
     import datetime
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    try:
+        from zoneinfo import ZoneInfo
+        now = datetime.datetime.now(ZoneInfo("America/Sao_Paulo")).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        now = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M") + " UTC"
     note_id = f"{root}/00-settings/agent-mem.md"
 
     # Bullet points das notas afetadas
@@ -1157,8 +1161,8 @@ def ask(question: str, collections: Optional[list] = None, root: Optional[str] =
             except Exception as e:
                 log.warning(f"on_progress callback erro: {e}")
 
-        if tool in ("edit_note", "create_note", "add_tags"):
-            sources.append(args.get("note_id") or args.get("path", ""))
+        if tool in ("edit_note", "create_note", "add_tags", "ensure_settings"):
+            sources.append(args.get("note_id") or args.get("path") or args.get("root", ""))
         elif tool == "move_note":
             sources.append(args.get("dest_id", ""))
         elif tool == "delete_note":
@@ -1190,7 +1194,7 @@ def _build_actions_summary(sources: list, messages: list) -> str:
             c = msg.get("content", "")
             if "Resultado de move_note" in c:
                 counts["movidas"] += 1
-            elif "Resultado de create_note" in c:
+            elif "Resultado de create_note" in c or "Resultado de ensure_settings" in c:
                 counts["criadas"] += 1
             elif "Resultado de edit_note" in c:
                 counts["editadas"] += 1
