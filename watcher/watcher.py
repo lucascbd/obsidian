@@ -75,10 +75,15 @@ def wait_for_services():
     log.info("Aguardando ChromaDB...")
     while True:
         try:
-            r = requests.get(f"http://{CHROMA_HOST}:{CHROMA_PORT}/api/v1/heartbeat", timeout=5)
-            if r.status_code == 200:
-                log.info("ChromaDB OK")
-                break
+            # Tenta v2 primeiro, cai para v1 se não existir
+            for path in ("/api/v2/heartbeat", "/api/v1/heartbeat"):
+                try:
+                    r = requests.get(f"http://{CHROMA_HOST}:{CHROMA_PORT}{path}", timeout=5)
+                    if r.status_code == 200:
+                        log.info("ChromaDB OK")
+                        return
+                except Exception:
+                    continue
         except Exception:
             pass
         time.sleep(3)
