@@ -9,6 +9,7 @@ import json
 import logging
 import requests
 import chromadb
+from typing import Optional
 from fastembed import TextEmbedding
 
 log = logging.getLogger(__name__)
@@ -232,7 +233,7 @@ def tool_ensure_settings(root: str) -> str:
 
 
 # ── Tools disponíveis para o agente ──────────────────────────────────────────
-def purge_vault(keep_prefix: str | None = None) -> dict:
+def purge_vault(keep_prefix: Optional[str] = None) -> dict:
     """Marca todas as notas ativas como deleted=true no CouchDB (formato LiveSync).
     keep_prefix: se fornecido, preserva notas que começam com esse prefixo."""
     import time
@@ -372,7 +373,7 @@ def _is_settings_note(note_id: str) -> bool:
     return "00-settings" in parts
 
 
-def tool_search_vault(query: str, collections: list | None = None, root: str | None = None) -> str:
+def tool_search_vault(query: str, collections: Optional[list] = None, root: Optional[str] = None) -> str:
     """Busca semântica no vault via ChromaDB, opcionalmente filtrada por pasta raiz."""
     cols  = collections or COLLECTIONS
     model = get_embed_model()
@@ -424,7 +425,7 @@ def tool_edit_note(note_id: str, content: str) -> str:
         return f"Erro ao editar nota '{note_id}': {e}"
 
 
-def tool_list_notes(root: str | None = None) -> str:
+def tool_list_notes(root: Optional[str] = None) -> str:
     """Lista todas as notas ativas (não deletadas) do vault, opcionalmente filtradas por pasta raiz.
     Exclui notas da pasta 00-settings."""
     try:
@@ -533,7 +534,7 @@ Responda APENAS com um JSON no formato:
 {{"path": "pasta/subpasta/nome.md", "content": "conteúdo completo da nota", "summary": "1-2 frases descrevendo o que foi criado"}}"""
 
 
-def ingest(raw_text: str, source_name: str, root: str | None = None) -> dict:
+def ingest(raw_text: str, source_name: str, root: Optional[str] = None) -> dict:
     """Converte texto bruto em nota Obsidian e salva no vault."""
     import datetime
     note_ids = tool_list_notes(root=root)
@@ -597,12 +598,12 @@ def ingest(raw_text: str, source_name: str, root: str | None = None) -> dict:
     return {"answer": "Falha ao processar o conteúdo após 3 tentativas.", "sources": []}
 
 
-def ingest_file(filename: str, content: bytes, root: str | None = None) -> dict:
+def ingest_file(filename: str, content: bytes, root: Optional[str] = None) -> dict:
     raw_text = _extract_text_from_file(filename, content)
     return ingest(raw_text, source_name=filename, root=root)
 
 
-def ingest_url(url: str, root: str | None = None) -> dict:
+def ingest_url(url: str, root: Optional[str] = None) -> dict:
     try:
         raw_text = _extract_text_from_url(url)
     except Exception as e:
@@ -610,7 +611,7 @@ def ingest_url(url: str, root: str | None = None) -> dict:
     return ingest(raw_text, source_name=url, root=root)
 
 
-def ingest_zip(content: bytes, root: str | None = None) -> dict:
+def ingest_zip(content: bytes, root: Optional[str] = None) -> dict:
     """Extrai um ZIP e ingere cada arquivo suportado como nota Obsidian."""
     import zipfile
     SUPPORTED = {"txt", "md", "html", "htm", "pdf", "docx"}
@@ -957,8 +958,8 @@ def _call_llm_raw(messages: list) -> str:
     return r.json()["choices"][0]["message"]["content"].strip()
 
 
-def ask(question: str, collections: list | None = None, root: str | None = None,
-        on_progress: callable | None = None) -> dict:
+def ask(question: str, collections: Optional[list] = None, root: Optional[str] = None,
+        on_progress: Optional[callable] = None) -> dict:
     """Loop de tool calling via prompt até o agente chamar 'done'."""
 
     # Carrega settings do vault e injeta no system prompt
@@ -1189,19 +1190,19 @@ def _build_actions_summary(sources: list, messages: list) -> str:
 
 
 # ── Ações rápidas (mantidas para compatibilidade) ─────────────────────────────
-def weekly_summary(root: str | None = None) -> dict:
+def weekly_summary(root: Optional[str] = None) -> dict:
     return ask("Gere um resumo executivo semanal com: projetos em andamento e status, riscos e bloqueios, próximos passos prioritários, stakeholders que precisam de atenção.", root=root)
 
 
-def market_insights(root: str | None = None) -> dict:
+def market_insights(root: Optional[str] = None) -> dict:
     return ask("Com base nas análises e estudos registrados, identifique: principais tendências de mercado, oportunidades, riscos competitivos e gaps de conhecimento.", root=root)
 
 
-def summarize_meeting(note_id: str, root: str | None = None) -> dict:
+def summarize_meeting(note_id: str, root: Optional[str] = None) -> dict:
     return ask(f"Leia a nota {note_id} e gere: resumo executivo, decisões tomadas, action items com responsável e prazo, pontos que precisam de follow-up.", root=root)
 
 
-def vault_review(root: str | None = None) -> dict:
+def vault_review(root: Optional[str] = None) -> dict:
     return ask(
         "Liste todas as notas do vault. Para cada nota que tiver wiki links no formato [[caminho/Nota]] sem alias, "
         "leia a nota e corrija para [[caminho/Nota|Nota]]. Também identifique correlações óbvias entre notas e adicione links onde pertinente. "
