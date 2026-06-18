@@ -6,7 +6,7 @@ import os
 import logging
 from flask import Flask, request, jsonify, render_template_string
 from flask_cors import CORS
-from agent import ask, weekly_summary, market_insights, summarize_meeting
+from agent import ask, execute_task, weekly_summary, market_insights, summarize_meeting
 
 logging.basicConfig(
     level=logging.INFO,
@@ -62,6 +62,30 @@ HTML = """<!DOCTYPE html>
   }
   .action-btn:hover { background: var(--surface2); color: var(--text); }
   .action-btn.active { background: var(--accent); color: #fff; }
+
+  .mode-toggle {
+    display: flex; gap: 4px; padding: 4px; background: var(--surface2);
+    border-radius: 8px; margin: 8px 0 12px;
+  }
+  .mode-btn {
+    flex: 1; background: transparent; border: none; color: var(--muted);
+    padding: 6px 8px; border-radius: 6px; font-size: 11px; font-weight: 500;
+    cursor: pointer; font-family: 'Inter', sans-serif; transition: all 0.15s;
+    text-transform: uppercase; letter-spacing: 0.5px;
+  }
+  .mode-btn.active { background: var(--accent); color: #fff; }
+
+  .actions-log {
+    margin-top: 8px; padding: 8px 12px;
+    background: var(--surface2); border-radius: 8px;
+    border: 1px solid var(--border); font-size: 11px;
+    font-family: 'JetBrains Mono', monospace; color: var(--muted);
+    max-height: 160px; overflow-y: auto;
+  }
+  .actions-log .action-item { padding: 2px 0; border-bottom: 1px solid var(--border); }
+  .actions-log .action-item:last-child { border-bottom: none; }
+  .action-ok  { color: var(--green); }
+  .action-err { color: #ef4444; }
 
   /* Main */
   .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
@@ -146,6 +170,10 @@ HTML = """<!DOCTYPE html>
 
 <div class="layout">
   <aside class="sidebar">
+    <div class="mode-toggle">
+      <button class="mode-btn active" id="mode-ask" onclick="setMode('ask')">Perguntar</button>
+      <button class="mode-btn" id="mode-exec" onclick="setMode('execute')">Executar</button>
+    </div>
     <div class="sidebar-label">Ações rápidas</div>
     <button class="action-btn" onclick="runAction('weekly')">📅 Resumo semanal</button>
     <button class="action-btn" onclick="runAction('insights')">💡 Insights de mercado</button>
@@ -177,7 +205,7 @@ HTML = """<!DOCTYPE html>
         <option value="referencias">Referências</option>
         <option value="inbox">Inbox</option>
       </select>
-      <textarea id="input" placeholder="Pergunte algo sobre seu vault... (Enter para enviar)"
+      <textarea id="input" placeholder="Pergunte algo ou dê uma instrução para executar... (Enter para enviar)"
         onkeydown="handleKey(event)" oninput="autoResize(this)" rows="1"></textarea>
       <button class="send-btn" id="send-btn" onclick="sendMessage()">Enviar</button>
     </div>
@@ -186,6 +214,17 @@ HTML = """<!DOCTYPE html>
 
 <script>
   let activeFilter = null;
+  let currentMode  = 'ask';
+
+  function setMode(mode) {
+    currentMode = mode;
+    document.getElementById('mode-ask').classList.toggle('active',  mode === 'ask');
+    document.getElementById('mode-exec').classList.toggle('active', mode === 'execute');
+    const ph = mode === 'execute'
+      ? 'Descreva a tarefa a executar no vault... (ex: reestruture as pastas e padronize as tags)'
+      : 'Pergunte algo sobre seu vault...';
+    document.getElementById('input').placeholder = ph;
+  }
 
   function setFilter(col, el) {
     activeFilter = col;
@@ -203,7 +242,7 @@ HTML = """<!DOCTYPE html>
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
   }
 
-  function appendMsg(role, content, sources) {
+  function appendMsg(role, content, sources, actions) {
     const chat = document.getElementById('chat');
     document.getElementById('empty')?.remove();
 
@@ -226,6 +265,20 @@ HTML = """<!DOCTYPE html>
         src.appendChild(tag);
       });
       div.appendChild(src);
+    }
+
+    if (actions && actions.length) {
+      const log = document.createElement('div');
+      log.className = 'actions-log';
+      actions.forEach(a => {
+        const item = document.createElement('div');
+        item.className = 'action-item';
+        const ok = !a.result?.error;
+        const argsStr = Object.entries(a.args || {}).map(([k,v]) => `${k}=${JSON.stringify(v)}`).join(', ');
+        item.innerHTML = `<span class="${ok ? 'action-ok' : 'action-err'}">${ok ? '✓' : '✗'}</span> ${a.tool}(${argsStr})`;
+        log.appendChild(item);
+      });
+      div.appendChild(log);
     }
 
     chat.appendChild(div);
@@ -261,17 +314,24 @@ HTML = """<!DOCTYPE html>
     appendTyping();
 
     try {
-      const body = { question: q };
-      if (col) body.collections = [col];
+      let url, body;
+      if (currentMode === 'execute') {
+        url  = '/api/execute';
+        body = { instruction: q };
+      } else {
+        url  = '/api/ask';
+        body = { question: q };
+        if (col) body.collections = [col];
+      }
 
-      const r = await fetch('/api/ask', {
+      const r = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
       });
       const data = await r.json();
       removeTyping();
-      appendMsg('agent', data.answer, data.sources);
+      appendMsg('agent', data.answer, data.sources, data.actions);
     } catch (e) {
       removeTyping();
       appendMsg('agent', '❌ Erro ao consultar o agente. Verifique os logs.');
@@ -317,6 +377,16 @@ def api_ask():
     if not question:
         return jsonify({"error": "question obrigatório"}), 400
     result = ask(question, collections)
+    return jsonify(result)
+
+
+@app.route("/api/execute", methods=["POST"])
+def api_execute():
+    data        = request.get_json()
+    instruction = data.get("instruction", "").strip()
+    if not instruction:
+        return jsonify({"error": "instruction obrigatório"}), 400
+    result = execute_task(instruction)
     return jsonify(result)
 
 
