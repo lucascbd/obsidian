@@ -138,6 +138,49 @@ def purge_vault(keep_prefix: str | None = None) -> dict:
     }
 
 
+def purge_orphan_leaves() -> dict:
+    """Remove leaf docs (h:) cujo pai está deletado ou não existe."""
+    r = requests.get(
+        f"{COUCHDB_URL}/{COUCHDB_DB}/_all_docs",
+        params={"include_docs": True},
+        auth=COUCHDB_AUTH, timeout=30,
+    )
+    r.raise_for_status()
+    rows = r.json().get("rows", [])
+
+    # Coleta todos os leaf IDs referenciados por notas ativas
+    referenced = set()
+    for row in rows:
+        doc = row.get("doc", {})
+        if doc.get("deleted") or row["id"].startswith("h:") or row["id"].startswith("_"):
+            continue
+        referenced.update(doc.get("children", []))
+
+    # Deleta leaves não referenciados
+    removed = []
+    for row in rows:
+        nid = row["id"]
+        if not nid.startswith("h:"):
+            continue
+        if nid in referenced:
+            continue
+        try:
+            doc = row["doc"]
+            requests.delete(
+                f"{COUCHDB_URL}/{COUCHDB_DB}/{requests.utils.quote(nid, safe='')}",
+                params={"rev": doc["_rev"]},
+                auth=COUCHDB_AUTH, timeout=10,
+            ).raise_for_status()
+            removed.append(nid)
+        except Exception as e:
+            log.error(f"Erro ao deletar leaf {nid}: {e}")
+
+    return {
+        "answer": f"{len(removed)} leaf(s) órfão(s) removido(s).",
+        "sources": [],
+    }
+
+
 def repair_vault() -> dict:
     """Corrige size mismatch em documentos do CouchDB."""
     r = requests.get(
