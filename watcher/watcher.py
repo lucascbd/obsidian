@@ -26,28 +26,24 @@ CHROMA_HOST  = os.environ.get("CHROMADB_HOST", "chromadb")
 CHROMA_PORT  = int(os.environ.get("CHROMADB_PORT", 8000))
 AUTH         = (COUCHDB_USER, COUCHDB_PASS)
 
-# Mapeamento de pasta → coleção ChromaDB
-FOLDER_MAP = {
-    "06-Reunioes":     "reunioes",
-    "01-Projetos":     "projetos",
-    "04-Stakeholders": "stakeholders",
-    "05-Fontes":       "referencias",
-    "07-Referencias":  "referencias",
-    "02-Mercados":     "analises",
-    "03-Marcas":       "analises",
-    "00-Inbox":        "inbox",
-}
-
 CHUNK_SIZE    = 400   # palavras por chunk
 CHUNK_OVERLAP = 40    # overlap entre chunks
+
+# Caracteres inválidos para nome de coleção ChromaDB
+import re as _re
+_INVALID_COL = _re.compile(r"[^a-zA-Z0-9_-]")
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 def get_collection_name(note_id: str) -> str:
-    for prefix, col in FOLDER_MAP.items():
-        if note_id.startswith(prefix):
-            return col
-    return "inbox"
+    """Usa a pasta raiz do note_id como nome da coleção ChromaDB.
+    Ex: 'personal/analises/nota.md' → 'personal'
+        'reunioes/kick-off.md'      → 'reunioes'
+    """
+    root = note_id.split("/")[0] if "/" in note_id else "vault"
+    # ChromaDB exige 3-63 chars, só letras/números/- e _
+    col = _INVALID_COL.sub("_", root)[:63]
+    return col or "vault"
 
 
 def chunk_text(text: str) -> list[str]:

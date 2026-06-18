@@ -26,7 +26,23 @@ COUCHDB_PASS = os.environ.get("COUCHDB_PASSWORD", "")
 COUCHDB_DB   = os.environ.get("COUCHDB_DB", "obsidian-vault")
 COUCHDB_AUTH = (COUCHDB_USER, COUCHDB_PASS)
 
-COLLECTIONS = ["reunioes", "projetos", "stakeholders", "analises", "referencias", "inbox"]
+COLLECTIONS = []  # dinâmico: populado a partir das coleções existentes no ChromaDB
+
+import re as _re
+_INVALID_COL = _re.compile(r"[^a-zA-Z0-9_-]")
+
+
+def _col_name(note_id: str) -> str:
+    root = note_id.split("/")[0] if "/" in note_id else "vault"
+    return (_INVALID_COL.sub("_", root)[:63]) or "vault"
+
+
+def _get_all_collections() -> list:
+    """Retorna todas as coleções existentes no ChromaDB."""
+    try:
+        return [c.name for c in get_chroma().list_collections()]
+    except Exception:
+        return []
 
 MAX_ROUNDS = 200
 
@@ -375,7 +391,9 @@ def _is_settings_note(note_id: str) -> bool:
 
 def tool_search_vault(query: str, collections: Optional[list] = None, root: Optional[str] = None) -> str:
     """Busca semântica no vault via ChromaDB, opcionalmente filtrada por pasta raiz."""
-    cols  = collections or COLLECTIONS
+    cols  = collections or _get_all_collections()
+    if not cols:
+        return "ChromaDB sem coleções — vault ainda não indexado pelo watcher."
     model = get_embed_model()
     chroma = get_chroma()
     embedding = list(model.embed([query]))[0].tolist()
