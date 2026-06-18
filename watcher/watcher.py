@@ -94,15 +94,41 @@ def ensure_db():
         log.info(f"Banco '{COUCHDB_DB}' criado.")
 
 
+def _read_livesync_content(doc: dict) -> str:
+    """Lê o conteúdo real de uma nota no formato LiveSync (children/leaves)."""
+    # Formato LiveSync: conteúdo distribuído em leaf docs referenciados por doc["children"]
+    children = doc.get("children", [])
+    if children:
+        parts = []
+        for leaf_id in children:
+            try:
+                r = requests.get(
+                    f"{COUCHDB_URL}/{COUCHDB_DB}/{requests.utils.quote(leaf_id, safe='')}",
+                    auth=AUTH, timeout=10,
+                )
+                if r.status_code == 200:
+                    parts.append(r.json().get("data", ""))
+            except Exception:
+                pass
+        return "".join(parts)
+    # Fallback: alguns formatos antigos guardam direto no doc
+    return doc.get("content", "") or doc.get("data", "")
+
+
 # ── Indexação ────────────────────────────────────────────────────────────────
 def index_note(doc: dict, chroma: chromadb.HttpClient, model: TextEmbedding):
     note_id = doc.get("_id", "")
 
-    # Ignora documentos internos do CouchDB e do LiveSync
+    # Ignora documentos internos do CouchDB, LiveSync e notas deletadas
     if note_id.startswith("_") or note_id.startswith("h:"):
         return
+    if doc.get("deleted"):
+        return
+    # Ignora notas de settings do agente
+    if "/00-settings/" in note_id:
+        return
 
-    content = doc.get("content", "") or doc.get("data", "")
+    content = _read_livesync_content(doc)
     if not content or not content.strip():
         return
 
