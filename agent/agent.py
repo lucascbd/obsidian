@@ -27,8 +27,24 @@ COUCHDB_AUTH = (COUCHDB_USER, COUCHDB_PASS)
 
 COLLECTIONS = ["reunioes", "projetos", "stakeholders", "analises", "referencias", "inbox"]
 
+MAX_ROUNDS = 200
+
 _embed_model = None
 _chroma      = None
+
+# Palavras-chave que indicam trabalho pendente na resposta de "done"
+_PENDING_PATTERNS = [
+    r"preciso continuar",
+    r"ainda restam",
+    r"pr[oó]ximas? notas?",
+    r"continuarei",
+    r"continuando",
+    r"processar(ei)? as? (pr[oó]ximas?|demais|restantes)",
+    r"nas pr[oó]ximas? itera[cç][oõ]es?",
+    r"faltam \d+",
+    r"pendentes?",
+]
+_PENDING_RE = re.compile("|".join(_PENDING_PATTERNS), re.IGNORECASE)
 
 
 def get_embed_model():
@@ -99,6 +115,120 @@ def _write_note_content(doc: dict, new_content: str) -> bool:
     fresh["mtime"] = int(time.time() * 1000)
     _couch("put", fresh["_id"], json=fresh)
     return True
+
+
+# ── Sistema 00-settings/ ──────────────────────────────────────────────────────
+DEFAULT_PROFILE_MD = """# Perfil do Agente
+
+Você é o Mordomo do Conhecimento — um agente autônomo que organiza, conecta e enriquece o vault Obsidian do usuário.
+
+## Persona
+- Organizado, proativo e direto
+- Executa tarefas até o fim sem pedir confirmação desnecessária
+- Usa linguagem clara e objetiva em português
+
+## Comportamento
+- Antecipa necessidades do usuário
+- Mantém consistência estrutural no vault
+- Prefere ação a análise excessiva
+"""
+
+DEFAULT_LOAD_MD = """# Regras de Ingestão
+
+## Estrutura de Pastas
+- Artigos e referências → `referencias/tema/nome.md`
+- Reuniões e atas → `reunioes/YYYY/nome-reuniao.md`
+- Projetos → `projetos/nome-projeto/`
+- Análises e estudos → `analises/tema/nome.md`
+- Perfis de empresas → `empresas/nome-empresa/perfil.md`
+- Relatórios de mercado → `mercado/regiao/nome-relatorio.md`
+
+## Frontmatter Obrigatório
+```yaml
+---
+title: Título da Nota
+date: YYYY-MM-DD
+source: URL ou nome do arquivo
+tags:
+  - tag1
+  - tag2
+---
+```
+
+## Qualidade
+- Slug em lowercase com hifens, sem acentos
+- Seções organizadas com ## e ###
+- Wiki links com alias: [[caminho/nota|Nome Visível]]
+- Conteúdo em português, conciso e navegável
+"""
+
+
+def load_settings(root: str) -> dict:
+    """Lê as notas de settings do vault. Retorna dict com profile, load e mem."""
+    settings = {"profile": "", "load": "", "mem": ""}
+    mapping = {
+        "profile": f"{root}/00-settings/profile.md",
+        "load":    f"{root}/00-settings/load.md",
+        "mem":     f"{root}/00-settings/agent-mem.md",
+    }
+    for key, note_id in mapping.items():
+        try:
+            doc = _couch("get", note_id)
+            if not doc.get("deleted"):
+                content = _read_note_content(doc)
+                settings[key] = content
+        except Exception:
+            pass
+    return settings
+
+
+def save_session_memory(root: str, question: str, answer: str, sources: list, actions_summary: str) -> None:
+    """Faz append em {root}/00-settings/agent-mem.md com o resumo da sessão."""
+    import datetime
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    note_id = f"{root}/00-settings/agent-mem.md"
+
+    # Bullet points das notas afetadas
+    notes_bullets = "\n".join(f"- {s}" for s in sources) if sources else "- (nenhuma nota afetada)"
+
+    new_entry = (
+        f"\n## Sessão {now}\n"
+        f"**Tarefa:** {question}\n"
+        f"**Ações:** {actions_summary}\n"
+        f"**Notas afetadas:**\n{notes_bullets}\n"
+        f"---\n"
+    )
+
+    try:
+        doc = _couch("get", note_id)
+        if doc.get("deleted"):
+            raise Exception("nota deletada")
+        existing = _read_note_content(doc)
+        _write_note_content(doc, existing + new_entry)
+    except Exception:
+        # Cria a nota se não existir
+        tool_create_note(note_id, f"# Memória de Sessões\n{new_entry}")
+
+
+def tool_ensure_settings(root: str) -> str:
+    """Cria {root}/00-settings/profile.md e {root}/00-settings/load.md com conteúdo padrão se não existirem."""
+    created = []
+    for note_id, default_content in [
+        (f"{root}/00-settings/profile.md", DEFAULT_PROFILE_MD),
+        (f"{root}/00-settings/load.md",    DEFAULT_LOAD_MD),
+    ]:
+        try:
+            doc = _couch("get", note_id)
+            if not doc.get("deleted"):
+                continue  # já existe
+        except Exception:
+            pass
+        result = tool_create_note(note_id, default_content)
+        created.append(f"{note_id}: {result}")
+
+    if not created:
+        return f"Arquivos de settings já existem em '{root}/00-settings/'."
+    return "Settings criados:\n" + "\n".join(created)
 
 
 # ── Tools disponíveis para o agente ──────────────────────────────────────────
@@ -236,6 +366,12 @@ def get_root_folders() -> list:
         return []
 
 
+def _is_settings_note(note_id: str) -> bool:
+    """Retorna True se a nota pertence à pasta 00-settings (em qualquer root)."""
+    parts = note_id.split("/")
+    return "00-settings" in parts
+
+
 def tool_search_vault(query: str, collections: list | None = None, root: str | None = None) -> str:
     """Busca semântica no vault via ChromaDB, opcionalmente filtrada por pasta raiz."""
     cols  = collections or COLLECTIONS
@@ -250,6 +386,8 @@ def tool_search_vault(query: str, collections: list | None = None, root: str | N
             for doc, meta, dist in zip(r["documents"][0], r["metadatas"][0], r["distances"][0]):
                 nid = meta["note_id"]
                 if root and not nid.startswith(root + "/"):
+                    continue
+                if _is_settings_note(nid):
                     continue
                 results.append({
                     "note_id": nid,
@@ -287,7 +425,8 @@ def tool_edit_note(note_id: str, content: str) -> str:
 
 
 def tool_list_notes(root: str | None = None) -> str:
-    """Lista todas as notas ativas (não deletadas) do vault, opcionalmente filtradas por pasta raiz."""
+    """Lista todas as notas ativas (não deletadas) do vault, opcionalmente filtradas por pasta raiz.
+    Exclui notas da pasta 00-settings."""
     try:
         r = requests.get(
             f"{COUCHDB_URL}/{COUCHDB_DB}/_all_docs",
@@ -301,6 +440,7 @@ def tool_list_notes(root: str | None = None) -> str:
             and not row["id"].startswith("h:")
             and not row.get("doc", {}).get("deleted")
             and (not root or row["id"].startswith(root + "/"))
+            and not _is_settings_note(row["id"])
         ]
         return json.dumps(ids, ensure_ascii=False)
     except Exception as e:
@@ -405,7 +545,14 @@ def ingest(raw_text: str, source_name: str, root: str | None = None) -> dict:
         f"NUNCA crie wiki links para notas fora de '{root}/'."
     ) if root else ""
 
-    prompt = (INGEST_PROMPT + root_instruction).replace("{note_ids}", note_ids[:3000]).replace("{today}", today)
+    # Carrega regras de ingestão do vault se root fornecido
+    load_rules = ""
+    if root:
+        settings = load_settings(root)
+        if settings.get("load"):
+            load_rules = f"\n\nREGRAS DE INGESTÃO DO VAULT:\n{settings['load']}"
+
+    prompt = (INGEST_PROMPT + root_instruction + load_rules).replace("{note_ids}", note_ids[:3000]).replace("{today}", today)
     user_msg = f"FONTE: {source_name}\n\nCONTEÚDO:\n{raw_text[:8000]}"
 
     messages = [
@@ -718,17 +865,32 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "ensure_settings",
+            "description": "Cria os arquivos de configuração do agente (profile.md e load.md) em 00-settings/ se não existirem.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "root": {"type": "string", "description": "Pasta raiz do vault"},
+                },
+                "required": ["root"],
+            },
+        },
+    },
 ]
 
 TOOL_FNS = {
-    "search_vault": lambda args: tool_search_vault(**args),
-    "read_note":    lambda args: tool_read_note(**args),
-    "list_notes":   lambda args: tool_list_notes(),
-    "edit_note":    lambda args: tool_edit_note(**args),
-    "create_note":  lambda args: tool_create_note(**args),
-    "move_note":    lambda args: tool_move_note(**args),
-    "delete_note":  lambda args: tool_delete_note(**args),
-    "add_tags":     lambda args: tool_add_tags(**args),
+    "search_vault":   lambda args: tool_search_vault(**args),
+    "read_note":      lambda args: tool_read_note(**args),
+    "list_notes":     lambda args: tool_list_notes(),
+    "edit_note":      lambda args: tool_edit_note(**args),
+    "create_note":    lambda args: tool_create_note(**args),
+    "move_note":      lambda args: tool_move_note(**args),
+    "delete_note":    lambda args: tool_delete_note(**args),
+    "add_tags":       lambda args: tool_add_tags(**args),
+    "ensure_settings": lambda args: tool_ensure_settings(**args),
 }
 
 SYSTEM_PROMPT = """Você é o Mordomo do Conhecimento — um agente autônomo que organiza, conecta e enriquece o vault Obsidian do usuário.
@@ -755,6 +917,7 @@ FORMATO OBRIGATÓRIO — SEM EXCEÇÃO:
 {"tool": "move_note", "args": {"source_id": "caminho/atual.md", "dest_id": "caminho/novo.md"}}
 {"tool": "delete_note", "args": {"note_id": "caminho/nota.md"}}
 {"tool": "add_tags", "args": {"note_id": "caminho/nota.md", "tags": ["tag1", "tag2"]}}
+{"tool": "ensure_settings", "args": {"root": "nome-do-vault"}}
 {"tool": "done", "args": {"answer": "resumo completo do que foi feito"}}
 
 REGRAS DE EXECUÇÃO:
@@ -794,8 +957,22 @@ def _call_llm_raw(messages: list) -> str:
     return r.json()["choices"][0]["message"]["content"].strip()
 
 
-def ask(question: str, collections: list | None = None, root: str | None = None) -> dict:
+def ask(question: str, collections: list | None = None, root: str | None = None,
+        on_progress: callable | None = None) -> dict:
     """Loop de tool calling via prompt até o agente chamar 'done'."""
+
+    # Carrega settings do vault e injeta no system prompt
+    settings_ctx = ""
+    if root:
+        settings = load_settings(root)
+        parts = []
+        if settings.get("profile"):
+            parts.append(f"## PERFIL DO AGENTE (do vault)\n{settings['profile']}")
+        if settings.get("mem"):
+            parts.append(f"## MEMÓRIA DE SESSÕES ANTERIORES\n{settings['mem'][-3000:]}")
+        if parts:
+            settings_ctx = "\n\n" + "\n\n".join(parts)
+
     root_ctx = (
         f"\n\nESCOPO ATIVO: '{root}/'\n"
         f"- Todas as notas criadas DEVEM começar com '{root}/'\n"
@@ -805,7 +982,7 @@ def ask(question: str, collections: list | None = None, root: str | None = None)
     ) if root else ""
 
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT + root_ctx},
+        {"role": "system", "content": SYSTEM_PROMPT + settings_ctx + root_ctx},
         {"role": "user",   "content": question},
     ]
     sources = []
@@ -858,19 +1035,29 @@ def ask(question: str, collections: list | None = None, root: str | None = None)
             return f"Bloqueado: nota '{nid}' fora do escopo '{root}/'."
         return tool_add_tags(**args)
 
+    def _scoped_ensure_settings(args):
+        r = args.get("root") or root
+        if not r:
+            return "Erro: root não especificado."
+        return tool_ensure_settings(r)
+
     scoped_fns = {
-        "search_vault": _scoped_search,
-        "read_note":    _scoped_read,
-        "list_notes":   _scoped_list,
-        "edit_note":    _scoped_edit,
-        "create_note":  _scoped_create,
-        "move_note":    _scoped_move,
-        "delete_note":  _scoped_delete,
-        "add_tags":     _scoped_add_tags,
+        "search_vault":    _scoped_search,
+        "read_note":       _scoped_read,
+        "list_notes":      _scoped_list,
+        "edit_note":       _scoped_edit,
+        "create_note":     _scoped_create,
+        "move_note":       _scoped_move,
+        "delete_note":     _scoped_delete,
+        "add_tags":        _scoped_add_tags,
+        "ensure_settings": _scoped_ensure_settings,
     }
 
     bad_format_streak = 0
-    while True:
+    rounds = 0
+
+    while rounds < MAX_ROUNDS:
+        rounds += 1
         raw = _call_llm_raw(messages)
         messages.append({"role": "assistant", "content": raw})
         log.info(f"LLM: {raw[:200]}")
@@ -902,7 +1089,26 @@ def ask(question: str, collections: list | None = None, root: str | None = None)
         args = call.get("args", {})
 
         if tool == "done":
-            return {"answer": args.get("answer", "Concluído."), "sources": list(set(sources))}
+            answer = args.get("answer", "Concluído.")
+
+            # Auto-continue: verifica se há trabalho pendente mencionado na resposta
+            if _PENDING_RE.search(answer):
+                log.info("Auto-continue: trabalho pendente detectado, continuando loop.")
+                messages.append({
+                    "role": "user",
+                    "content": "Continue a tarefa. Execute TUDO que está pendente antes de chamar done."
+                })
+                continue
+
+            # Salva memória da sessão
+            if root:
+                try:
+                    actions_summary = _build_actions_summary(sources, messages)
+                    save_session_memory(root, question, answer, list(set(sources)), actions_summary)
+                except Exception as e:
+                    log.warning(f"Falha ao salvar memória de sessão: {e}")
+
+            return {"answer": answer, "sources": list(set(sources))}
 
         if tool not in scoped_fns:
             messages.append({"role": "user", "content": f"Ferramenta '{tool}' não existe. Use: search_vault, read_note, list_notes, edit_note, create_note, done."})
@@ -910,6 +1116,20 @@ def ask(question: str, collections: list | None = None, root: str | None = None)
 
         result = scoped_fns[tool](args)
         log.info(f"Tool {tool} result: {str(result)[:200]}")
+
+        # Notifica progresso via callback
+        if on_progress is not None:
+            try:
+                result_str = str(result)
+                args_resumido = {k: (v[:80] if isinstance(v, str) and len(v) > 80 else v)
+                                 for k, v in args.items()}
+                on_progress({
+                    "tool":           tool,
+                    "args":           args_resumido,
+                    "result_preview": result_str[:120],
+                })
+            except Exception as e:
+                log.warning(f"on_progress callback erro: {e}")
 
         if tool in ("edit_note", "create_note", "add_tags"):
             sources.append(args.get("note_id") or args.get("path", ""))
@@ -919,6 +1139,53 @@ def ask(question: str, collections: list | None = None, root: str | None = None)
             sources.append(args.get("note_id", ""))
 
         messages.append({"role": "user", "content": f"Resultado de {tool}:\n{result}"})
+
+    # MAX_ROUNDS atingido — salva memória parcial e retorna
+    log.warning(f"MAX_ROUNDS ({MAX_ROUNDS}) atingido. Salvando memória parcial.")
+    partial_answer = f"Tarefa interrompida após {MAX_ROUNDS} rounds. Trabalho parcial realizado em {len(set(sources))} nota(s)."
+    if root:
+        try:
+            actions_summary = _build_actions_summary(sources, messages)
+            save_session_memory(root, question, partial_answer, list(set(sources)), actions_summary)
+        except Exception as e:
+            log.warning(f"Falha ao salvar memória parcial: {e}")
+    return {"answer": partial_answer, "sources": list(set(sources))}
+
+
+def _build_actions_summary(sources: list, messages: list) -> str:
+    """Gera um resumo compacto das ações executadas a partir das fontes e mensagens."""
+    if not sources:
+        return "nenhuma ação executada"
+
+    # Conta tipos de ação a partir das mensagens de resultado
+    counts = {"movidas": 0, "criadas": 0, "editadas": 0, "deletadas": 0, "tags": 0}
+    for msg in messages:
+        if msg.get("role") == "user":
+            c = msg.get("content", "")
+            if "Resultado de move_note" in c:
+                counts["movidas"] += 1
+            elif "Resultado de create_note" in c:
+                counts["criadas"] += 1
+            elif "Resultado de edit_note" in c:
+                counts["editadas"] += 1
+            elif "Resultado de delete_note" in c:
+                counts["deletadas"] += 1
+            elif "Resultado de add_tags" in c:
+                counts["tags"] += 1
+
+    parts = []
+    if counts["movidas"]:
+        parts.append(f"{counts['movidas']} nota(s) movida(s)")
+    if counts["criadas"]:
+        parts.append(f"{counts['criadas']} nota(s) criada(s)")
+    if counts["editadas"]:
+        parts.append(f"{counts['editadas']} nota(s) editada(s)")
+    if counts["deletadas"]:
+        parts.append(f"{counts['deletadas']} nota(s) deletada(s)")
+    if counts["tags"]:
+        parts.append(f"{counts['tags']} tag(s) adicionada(s)")
+
+    return ", ".join(parts) if parts else f"{len(set(sources))} nota(s) afetada(s)"
 
 
 # ── Ações rápidas (mantidas para compatibilidade) ─────────────────────────────

@@ -3,8 +3,11 @@ app.py — Interface web do agente. Acessível via browser na rede local.
 """
 
 import os
+import queue
+import json
 import logging
-from flask import Flask, request, jsonify, render_template_string
+import threading
+from flask import Flask, request, jsonify, render_template_string, Response, stream_with_context
 from flask_cors import CORS
 from agent import ask, weekly_summary, market_insights, summarize_meeting, vault_review, repair_vault, purge_vault, purge_orphan_leaves, ingest_file, ingest_url, ingest_zip, get_root_folders
 
@@ -94,6 +97,21 @@ HTML = """<!DOCTYPE html>
   .typing span:nth-child(2) { animation-delay: 0.2s; }
   .typing span:nth-child(3) { animation-delay: 0.4s; }
   @keyframes bounce { 0%,60%,100% { transform: translateY(0); } 30% { transform: translateY(-6px); } }
+
+  /* Progress indicator para SSE */
+  .progress-list {
+    padding: 8px 16px; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; border-bottom-left-radius: 4px;
+    display: flex; flex-direction: column; gap: 4px; max-width: 600px;
+  }
+  .progress-item {
+    font-size: 12px; color: var(--muted); font-family: 'JetBrains Mono', monospace;
+    display: flex; align-items: flex-start; gap: 6px;
+  }
+  .progress-item .tool-name {
+    color: var(--accent); font-weight: 500; min-width: 90px; flex-shrink: 0;
+  }
+  .progress-item .tool-detail { color: var(--label); word-break: break-all; }
 
   .input-area {
     border-top: 1px solid var(--border);
@@ -301,6 +319,34 @@ HTML = """<!DOCTYPE html>
     document.getElementById('typing-indicator')?.remove();
   }
 
+  // ── SSE progress panel ────────────────────────────────────────────────────
+  function createProgressPanel() {
+    const chat = document.getElementById('chat');
+    document.getElementById('empty')?.remove();
+    const div = document.createElement('div');
+    div.className = 'msg agent';
+    div.id = 'progress-panel';
+    const list = document.createElement('div');
+    list.className = 'progress-list';
+    div.appendChild(list);
+    chat.appendChild(div);
+    chat.scrollTop = chat.scrollHeight;
+    return list;
+  }
+
+  function addProgressItem(list, tool, detail) {
+    const item = document.createElement('div');
+    item.className = 'progress-item';
+    item.innerHTML = `<span class="tool-name">${tool}</span><span class="tool-detail">${detail}</span>`;
+    list.appendChild(item);
+    const chat = document.getElementById('chat');
+    chat.scrollTop = chat.scrollHeight;
+  }
+
+  function removeProgressPanel() {
+    document.getElementById('progress-panel')?.remove();
+  }
+
   async function sendMessage() {
     const input = document.getElementById('input');
     const q = input.value.trim();
@@ -312,22 +358,52 @@ HTML = """<!DOCTYPE html>
     document.getElementById('send-btn').disabled = true;
 
     appendMsg('user', q);
-    appendTyping();
 
+    const body = { question: q };
+    if (col) body.collections = [col];
+    if (getRoot()) body.root = getRoot();
+
+    // Usa SSE streaming
+    let progressList = null;
     try {
-      const body = { question: q };
-      if (col) body.collections = [col];
-      if (getRoot()) body.root = getRoot();
-
-      const r = await fetch('/api/ask', {
+      const response = await fetch('/api/ask/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
       });
-      const data = await r.json();
-      removeTyping();
-      appendMsg('agent', data.answer, data.sources);
+
+      if (!response.ok) throw new Error('SSE request failed');
+
+      progressList = createProgressPanel();
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\\n');
+        buffer = lines.pop(); // guarda linha incompleta
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const evt = JSON.parse(line.slice(6));
+            if (evt.type === 'progress') {
+              addProgressItem(progressList, evt.tool, evt.detail || '');
+            } else if (evt.type === 'done') {
+              removeProgressPanel();
+              appendMsg('agent', evt.answer, evt.sources);
+            } else if (evt.type === 'error') {
+              removeProgressPanel();
+              appendMsg('agent', '❌ ' + evt.message);
+            }
+          } catch(e) { /* ignora linhas malformadas */ }
+        }
+      }
     } catch (e) {
+      removeProgressPanel();
       removeTyping();
       appendMsg('agent', '❌ Erro ao consultar o agente. Verifique os logs.');
     }
@@ -472,6 +548,7 @@ def api_vault_stats():
 
 @app.route("/api/ask", methods=["POST"])
 def api_ask():
+    """Endpoint síncrono (compatibilidade). Retorna JSON quando o agente termina."""
     data        = request.get_json()
     question    = data.get("question", "").strip()
     collections = data.get("collections")
@@ -480,6 +557,84 @@ def api_ask():
         return jsonify({"error": "question obrigatório"}), 400
     result = ask(question, collections, root=root)
     return jsonify(result)
+
+
+@app.route("/api/ask/stream", methods=["POST"])
+def api_ask_stream():
+    """Endpoint SSE: emite eventos de progresso enquanto o agente trabalha."""
+    data        = request.get_json()
+    question    = (data or {}).get("question", "").strip()
+    collections = (data or {}).get("collections")
+    root        = (data or {}).get("root") or None
+
+    if not question:
+        def _err():
+            yield f"data: {json.dumps({'type': 'error', 'message': 'question obrigatório'})}\n\n"
+        return Response(stream_with_context(_err()), mimetype="text/event-stream")
+
+    q: queue.Queue = queue.Queue()
+    _SENTINEL = object()
+
+    def _on_progress(event: dict):
+        """Callback chamado pelo agente a cada tool call."""
+        tool   = event.get("tool", "")
+        args   = event.get("args", {})
+        preview = event.get("result_preview", "")
+
+        # Monta detalhe legível por tool
+        if tool == "move_note":
+            detail = f"{args.get('source_id', '')} → {args.get('dest_id', '')}"
+        elif tool == "add_tags":
+            tags = args.get("tags", [])
+            detail = f"{args.get('note_id', '')} +{tags}"
+        elif tool == "delete_note":
+            detail = args.get("note_id", "")
+        elif tool == "create_note":
+            detail = args.get("path", "")
+        elif tool == "edit_note":
+            detail = args.get("note_id", "")
+        elif tool == "search_vault":
+            detail = args.get("query", "")[:80]
+        elif tool == "read_note":
+            detail = args.get("note_id", "")
+        elif tool == "ensure_settings":
+            detail = f"root={args.get('root', '')}"
+        else:
+            detail = preview[:120] if preview else ""
+
+        q.put({"type": "progress", "tool": tool, "detail": detail})
+
+    def _run_agent():
+        try:
+            result = ask(question, collections, root=root, on_progress=_on_progress)
+            q.put({"type": "done", "answer": result.get("answer", ""), "sources": result.get("sources", [])})
+        except Exception as e:
+            q.put({"type": "error", "message": str(e)})
+        finally:
+            q.put(_SENTINEL)
+
+    thread = threading.Thread(target=_run_agent, daemon=True)
+    thread.start()
+
+    def _generate():
+        while True:
+            try:
+                item = q.get(timeout=180)
+            except queue.Empty:
+                yield f"data: {json.dumps({'type': 'error', 'message': 'timeout aguardando agente'})}\n\n"
+                break
+            if item is _SENTINEL:
+                break
+            yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+
+    return Response(
+        stream_with_context(_generate()),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.route("/api/weekly", methods=["POST"])
