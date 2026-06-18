@@ -263,16 +263,18 @@ HTML = """<!DOCTYPE html>
           <div id="attach-popover" style="display:none;position:absolute;bottom:52px;left:0;
                background:var(--surface);border:1px solid var(--border);border-radius:10px;
                padding:6px;min-width:200px;box-shadow:0 4px 20px rgba(0,0,0,.4);z-index:200">
-            <label for="attach-analyze" style="display:flex;align-items:center;gap:8px;padding:9px 12px;
-                   border-radius:7px;font-size:13px;color:var(--label);cursor:pointer;font-family:Inter,sans-serif"
+            <button onclick="event.stopPropagation();document.getElementById('attach-analyze').click();closePopover()"
+                   style="display:flex;align-items:center;gap:8px;padding:9px 12px;width:100%;
+                   border-radius:7px;font-size:13px;color:var(--label);cursor:pointer;font-family:Inter,sans-serif;
+                   background:none;border:none;"
                    onmouseover="this.style.background='var(--surface2)'"
-                   onmouseout="this.style.background=''"
-                   onclick="closePopover()">🔍 Analisar no chat</label>
-            <label for="attach-ingest" style="display:flex;align-items:center;gap:8px;padding:9px 12px;
-                   border-radius:7px;font-size:13px;color:var(--label);cursor:pointer;font-family:Inter,sans-serif"
+                   onmouseout="this.style.background=''">🔍 Analisar no chat</button>
+            <button onclick="event.stopPropagation();document.getElementById('attach-ingest').click();closePopover()"
+                   style="display:flex;align-items:center;gap:8px;padding:9px 12px;width:100%;
+                   border-radius:7px;font-size:13px;color:var(--label);cursor:pointer;font-family:Inter,sans-serif;
+                   background:none;border:none;"
                    onmouseover="this.style.background='var(--surface2)'"
-                   onmouseout="this.style.background=''"
-                   onclick="closePopover()">💾 Salvar no vault</label>
+                   onmouseout="this.style.background=''">💾 Salvar no vault</button>
           </div>
         </div>
 
