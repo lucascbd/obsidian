@@ -6,7 +6,7 @@ import os
 import logging
 from flask import Flask, request, jsonify, render_template_string
 from flask_cors import CORS
-from agent import ask, weekly_summary, market_insights, summarize_meeting, vault_review, repair_vault, ingest_file, ingest_url, ingest_zip, get_root_folders
+from agent import ask, weekly_summary, market_insights, summarize_meeting, vault_review, repair_vault, purge_vault, ingest_file, ingest_url, ingest_zip, get_root_folders
 
 logging.basicConfig(
     level=logging.INFO,
@@ -503,6 +503,13 @@ def api_vault_review():
 @app.route("/api/repair", methods=["POST"])
 def api_repair():
     return jsonify(repair_vault())
+
+
+@app.route("/api/purge", methods=["POST"])
+def api_purge():
+    data        = request.get_json(silent=True) or {}
+    keep_prefix = data.get("keep_prefix") or None
+    return jsonify(purge_vault(keep_prefix=keep_prefix))
 
 
 @app.route("/api/meeting", methods=["POST"])

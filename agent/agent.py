@@ -102,6 +102,42 @@ def _write_note_content(doc: dict, new_content: str) -> bool:
 
 
 # ── Tools disponíveis para o agente ──────────────────────────────────────────
+def purge_vault(keep_prefix: str | None = None) -> dict:
+    """Marca todas as notas ativas como deleted=true no CouchDB (formato LiveSync).
+    keep_prefix: se fornecido, preserva notas que começam com esse prefixo."""
+    import time
+    r = requests.get(
+        f"{COUCHDB_URL}/{COUCHDB_DB}/_all_docs",
+        params={"include_docs": True},
+        auth=COUCHDB_AUTH, timeout=30,
+    )
+    r.raise_for_status()
+    purged, skipped = [], []
+    for row in r.json().get("rows", []):
+        doc = row.get("doc", {})
+        nid = row["id"]
+        if nid.startswith("_") or nid.startswith("h:") or nid == "obsydian_livesync_version":
+            continue
+        if doc.get("deleted"):
+            continue
+        if keep_prefix and nid.startswith(keep_prefix):
+            skipped.append(nid)
+            continue
+        try:
+            doc["deleted"] = True
+            doc["mtime"]   = int(time.time() * 1000)
+            _couch("put", nid, json=doc)
+            purged.append(nid)
+            log.info(f"Purged: {nid}")
+        except Exception as e:
+            log.error(f"Erro ao purgar {nid}: {e}")
+    return {
+        "answer": f"{len(purged)} nota(s) removida(s) do banco.\n" + "\n".join(f"- {n}" for n in purged),
+        "sources": purged,
+        "skipped": skipped,
+    }
+
+
 def repair_vault() -> dict:
     """Corrige size mismatch em documentos do CouchDB."""
     r = requests.get(
