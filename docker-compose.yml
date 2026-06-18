@@ -54,7 +54,7 @@ services:
         echo "CouchDB configurado com sucesso."
 
   chromadb:
-    image: chromadb/chroma:latest
+    image: chromadb/chroma:0.5.20
     container_name: obsidian-chromadb
     restart: unless-stopped
     ports:
