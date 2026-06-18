@@ -959,7 +959,7 @@ def _call_llm_raw(messages: list) -> str:
 
 
 def ask(question: str, collections: Optional[list] = None, root: Optional[str] = None,
-        on_progress: Optional[callable] = None) -> dict:
+        on_progress=None) -> dict:
     """Loop de tool calling via prompt até o agente chamar 'done'."""
 
     # Carrega settings do vault e injeta no system prompt
