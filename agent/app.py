@@ -318,7 +318,7 @@ HTML = """<!DOCTYPE html>
     input.style.height = 'auto';
     document.getElementById('send-btn').disabled = true;
 
-    var userLabel = hasFile ? ('📎 ' + attachedFile.file.name + (q ? '\n' + q : '')) : q;
+    var userLabel = hasFile ? ('📎 ' + attachedFile.file.name + (q ? '\\n' + q : '')) : q;
     appendMsg('user', userLabel);
 
     // Salvar arquivo no vault
@@ -367,7 +367,7 @@ HTML = """<!DOCTYPE html>
         var chunk = await reader.read();
         if (chunk.done) break;
         buf += decoder.decode(chunk.value, {stream:true});
-        var lines = buf.split('\n');
+        var lines = buf.split('\\n');
         buf = lines.pop();
         for (var i = 0; i < lines.length; i++) {
           var line = lines[i];
