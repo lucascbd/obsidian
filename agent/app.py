@@ -194,6 +194,11 @@ HTML = """<!DOCTYPE html>
       var r      = await fetch('/api/vaults');
       var data   = await r.json();
       var vaults = data.vaults || [];
+      console.log('api/vaults resposta:', JSON.stringify(data));
+
+      if (vaults.length === 0) {
+        console.warn('Nenhum vault retornado. Verifique os logs do container (docker logs obsidian-agent).');
+      }
 
       var sel  = document.getElementById('root-select');
       var filt = document.getElementById('filter-roots');
