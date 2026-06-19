@@ -19,6 +19,8 @@ CHROMA_PORT      = int(os.environ.get("CHROMADB_PORT", 8000))
 OPENROUTER_KEY   = os.environ["OPENROUTER_API_KEY"]
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "nousresearch/hermes-3-llama-3.1-70b")
 OPENROUTER_URL   = "https://openrouter.ai/api/v1/chat/completions"
+EMBEDDING_MODEL  = os.environ.get("EMBEDDING_MODEL", "intfloat/multilingual-e5-large")
+LINK_GRAPH_DOC   = "_local/link-graph"
 
 COUCHDB_URL  = os.environ.get("COUCHDB_URL", "http://couchdb:5984")
 COUCHDB_USER = os.environ.get("COUCHDB_USER", "")
@@ -26,23 +28,14 @@ COUCHDB_PASS = os.environ.get("COUCHDB_PASSWORD", "")
 COUCHDB_DB   = os.environ.get("COUCHDB_DB", "obsidian-vault")
 COUCHDB_AUTH = (COUCHDB_USER, COUCHDB_PASS)
 
-COLLECTIONS = []  # dinâmico: populado a partir das coleções existentes no ChromaDB
-
 import re as _re
 _INVALID_COL = _re.compile(r"[^a-zA-Z0-9_-]")
 
 
-def _col_name(note_id: str) -> str:
-    root = note_id.split("/")[0] if "/" in note_id else "vault"
-    return (_INVALID_COL.sub("_", root)[:63]) or "vault"
-
-
-def _get_all_collections() -> list:
-    """Retorna todas as coleções existentes no ChromaDB."""
-    try:
-        return [c.name for c in get_chroma().list_collections()]
-    except Exception:
-        return []
+def _col_name(vault: str) -> str:
+    """Uma coleção ChromaDB por vault (mesmo esquema do watcher)."""
+    col = _INVALID_COL.sub("_", vault)[:63]
+    return col or "vault"
 
 MAX_ROUNDS = 200
 
@@ -67,8 +60,8 @@ _PENDING_RE = re.compile("|".join(_PENDING_PATTERNS), re.IGNORECASE)
 def get_embed_model():
     global _embed_model
     if _embed_model is None:
-        log.info("Carregando modelo de embeddings...")
-        _embed_model = TextEmbedding("sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+        log.info(f"Carregando modelo de embeddings: {EMBEDDING_MODEL}")
+        _embed_model = TextEmbedding(EMBEDDING_MODEL)
     return _embed_model
 
 
@@ -387,34 +380,109 @@ def _is_settings_note(note_id: str) -> bool:
     return "00-meta" in parts
 
 
-def tool_search_vault(query: str, collections: Optional[list] = None, db: str = None) -> str:
-    """Busca semântica no vault via ChromaDB."""
-    cols  = collections or _get_all_collections()
-    if not cols:
-        return "ChromaDB sem coleções — vault ainda não indexado pelo watcher."
-    model = get_embed_model()
+def tool_search_vault(query: str, collections: Optional[list] = None, db: str = None,
+                      tags: Optional[str] = None, date_from: Optional[str] = None) -> str:
+    """Busca semântica no vault (uma coleção por vault). Suporta filtro por tags e data."""
+    vault  = db or COUCHDB_DB
+    col_nm = _col_name(vault)
+    model  = get_embed_model()
     chroma = get_chroma()
+
+    try:
+        col = chroma.get_collection(col_nm)
+    except Exception:
+        return "Vault ainda não indexado pelo watcher."
+
     embedding = list(model.embed([query]))[0].tolist()
-    results = []
-    for col_name in cols:
-        try:
-            col = chroma.get_collection(col_name)
-            r   = col.query(query_embeddings=[embedding], n_results=10)
-            for doc, meta, dist in zip(r["documents"][0], r["metadatas"][0], r["distances"][0]):
-                nid = meta["note_id"]
-                if _is_settings_note(nid):
-                    continue
-                results.append({
-                    "note_id": nid,
-                    "score":   round(1 - dist, 3),
-                    "excerpt": doc[:400],
-                })
-        except Exception:
-            pass
+
+    # Filtros de metadata opcionais
+    where: dict = {}
+    if tags:
+        where["tags"] = {"$contains": tags}
+    if date_from:
+        where["date"] = {"$gte": date_from}
+
+    try:
+        r = col.query(
+            query_embeddings=[embedding],
+            n_results=12,
+            where=where if where else None,
+            include=["documents", "metadatas", "distances"],
+        )
+    except Exception as e:
+        return f"Erro na busca: {e}"
+
+    seen, results = set(), []
+    for doc, meta, dist in zip(r["documents"][0], r["metadatas"][0], r["distances"][0]):
+        nid = meta.get("note_id", "")
+        if not nid or _is_settings_note(nid) or nid in seen:
+            continue
+        seen.add(nid)
+        results.append({
+            "note_id": nid,
+            "score":   round(1 - dist, 3),
+            "excerpt": doc[:400],
+            "title":   meta.get("title", ""),
+            "tags":    meta.get("tags", ""),
+            "date":    meta.get("date", ""),
+        })
+
     results.sort(key=lambda x: x["score"], reverse=True)
     if not results:
         return "Nenhuma nota encontrada."
     return json.dumps(results[:8], ensure_ascii=False)
+
+
+def _get_link_graph(db: str = None) -> dict:
+    """Lê o grafo de links do CouchDB (_local não replica via LiveSync)."""
+    _db = db or COUCHDB_DB
+    try:
+        r = requests.get(f"{COUCHDB_URL}/{_db}/{LINK_GRAPH_DOC}", auth=COUCHDB_AUTH, timeout=10)
+        if r.status_code == 200:
+            return r.json().get("links", {})
+    except Exception:
+        pass
+    return {}
+
+
+def tool_get_neighbors(note_id: str, db: str = None) -> str:
+    """Retorna notas diretamente conectadas via wiki links (grafo de conhecimento).
+    outgoing = notas que esta nota menciona; incoming = notas que mencionam esta."""
+    graph    = _get_link_graph(db=db)
+    outgoing = graph.get(note_id, [])
+    incoming = [nid for nid, links in graph.items() if note_id in links]
+    return json.dumps({
+        "note_id":       note_id,
+        "outgoing_links": outgoing,
+        "incoming_links": incoming,
+        "degree":        len(set(outgoing + incoming)),
+    }, ensure_ascii=False)
+
+
+def tool_graph_search(start_note_id: str, depth: int = 2, db: str = None) -> str:
+    """BFS no grafo de links a partir de uma nota — mapeia a rede de conhecimento conectada.
+    depth=1 vizinhos diretos, depth=2 vizinhos de vizinhos, etc."""
+    graph   = _get_link_graph(db=db)
+    visited: dict[str, dict] = {}
+    queue   = [(start_note_id, 0)]
+
+    while queue:
+        node, d = queue.pop(0)
+        if node in visited or d > depth:
+            continue
+        outgoing = graph.get(node, [])
+        incoming = [nid for nid, links in graph.items() if node in links]
+        visited[node] = {"depth": d, "outgoing": outgoing, "incoming": incoming}
+        for neighbor in set(outgoing + incoming):
+            if neighbor not in visited:
+                queue.append((neighbor, d + 1))
+
+    return json.dumps({
+        "start":        start_note_id,
+        "depth":        depth,
+        "nodes_found":  len(visited),
+        "network":      visited,
+    }, ensure_ascii=False)
 
 
 def tool_read_note(note_id: str, db: str = None) -> str:
@@ -778,15 +846,44 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "search_vault",
-            "description": "Busca semântica nas notas do vault. Use antes de ler notas específicas.",
+            "description": "Busca semântica nas notas do vault via embeddings. Use para encontrar notas relevantes. Suporta filtro por tags e data.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query":       {"type": "string", "description": "Texto para buscar"},
-                    "collections": {"type": "array", "items": {"type": "string"},
-                                    "description": "Filtrar por coleções: reunioes, projetos, stakeholders, analises, referencias, inbox"},
+                    "query":     {"type": "string", "description": "Texto para buscar semanticamente"},
+                    "tags":      {"type": "string", "description": "Filtrar por tag específica (ex: 'haleon', 'mercado')"},
+                    "date_from": {"type": "string", "description": "Filtrar notas a partir desta data (YYYY-MM-DD)"},
                 },
                 "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_neighbors",
+            "description": "Retorna notas diretamente conectadas a uma nota via wiki links. Use para navegar no grafo de conhecimento.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "note_id": {"type": "string", "description": "ID da nota para verificar conexões"},
+                },
+                "required": ["note_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "graph_search",
+            "description": "BFS no grafo de links a partir de uma nota. Mapeia a rede de conhecimento conectada. Use para encontrar clusters temáticos.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "start_note_id": {"type": "string", "description": "Nota inicial para o BFS"},
+                    "depth":         {"type": "integer", "description": "Profundidade do BFS (1=vizinhos diretos, 2=vizinhos de vizinhos). Padrão: 2"},
+                },
+                "required": ["start_note_id"],
             },
         },
     },
@@ -903,14 +1000,16 @@ TOOLS = [
 ]
 
 TOOL_FNS = {
-    "search_vault":   lambda args: tool_search_vault(**args),
-    "read_note":      lambda args: tool_read_note(**args),
-    "list_notes":     lambda args: tool_list_notes(),
-    "edit_note":      lambda args: tool_edit_note(**args),
-    "create_note":    lambda args: tool_create_note(**args),
-    "move_note":      lambda args: tool_move_note(**args),
-    "delete_note":    lambda args: tool_delete_note(**args),
-    "add_tags":       lambda args: tool_add_tags(**args),
+    "search_vault":    lambda args: tool_search_vault(**args),
+    "get_neighbors":   lambda args: tool_get_neighbors(**args),
+    "graph_search":    lambda args: tool_graph_search(**args),
+    "read_note":       lambda args: tool_read_note(**args),
+    "list_notes":      lambda args: tool_list_notes(),
+    "edit_note":       lambda args: tool_edit_note(**args),
+    "create_note":     lambda args: tool_create_note(**args),
+    "move_note":       lambda args: tool_move_note(**args),
+    "delete_note":     lambda args: tool_delete_note(**args),
+    "add_tags":        lambda args: tool_add_tags(**args),
     "ensure_settings": lambda args: tool_ensure_settings(**args),
 }
 
@@ -930,7 +1029,9 @@ FORMATO OBRIGATÓRIO — SEM EXCEÇÃO:
 - NUNCA escreva explicações fora do JSON
 - Use SOMENTE estes formatos:
 
-{"tool": "search_vault", "args": {"query": "...", "collections": ["opcional"]}}
+{"tool": "search_vault", "args": {"query": "...", "tags": "opcional", "date_from": "opcional YYYY-MM-DD"}}
+{"tool": "get_neighbors", "args": {"note_id": "caminho/nota.md"}}
+{"tool": "graph_search", "args": {"start_note_id": "caminho/nota.md", "depth": 2}}
 {"tool": "read_note", "args": {"note_id": "caminho/nota.md"}}
 {"tool": "list_notes", "args": {}}
 {"tool": "edit_note", "args": {"note_id": "caminho/nota.md", "content": "conteúdo markdown completo"}}
@@ -940,6 +1041,11 @@ FORMATO OBRIGATÓRIO — SEM EXCEÇÃO:
 {"tool": "add_tags", "args": {"note_id": "caminho/nota.md", "tags": ["tag1", "tag2"]}}
 {"tool": "ensure_settings", "args": {"vault": "nome-do-vault"}}
 {"tool": "done", "args": {"answer": "resumo completo do que foi feito"}}
+
+GRAFO DE CONHECIMENTO:
+- get_neighbors: vizinhos diretos (1 hop) de uma nota — rápido para explorar conexões imediatas
+- graph_search: BFS depth=2 para mapear clusters temáticos — use quando precisar entender contexto amplo
+- search_vault suporta filtro por tags= e date_from= para buscas precisas sem varredura total
 
 REGRAS DE EXECUÇÃO:
 - Execute a tarefa COMPLETA até o fim. Se há 50 notas para processar, processe as 50.
@@ -1018,44 +1124,18 @@ def ask(question: str, collections: Optional[list] = None, vault: Optional[str] 
     sources = []
 
     # Ferramentas com db vinculado ao vault escolhido
-    def _scoped_search(args):
-        return tool_search_vault(db=db, **args)
-
-    def _scoped_list(_args):
-        return tool_list_notes(db=db)
-
-    def _scoped_read(args):
-        return tool_read_note(db=db, **args)
-
-    def _scoped_edit(args):
-        return tool_edit_note(db=db, **args)
-
-    def _scoped_create(args):
-        return tool_create_note(db=db, **args)
-
-    def _scoped_move(args):
-        return tool_move_note(db=db, **args)
-
-    def _scoped_delete(args):
-        return tool_delete_note(db=db, **args)
-
-    def _scoped_add_tags(args):
-        return tool_add_tags(db=db, **args)
-
-    def _scoped_ensure_settings(args):
-        v = args.get("vault") or vault or ""
-        return tool_ensure_settings(v, db=db)
-
     scoped_fns = {
-        "search_vault":    _scoped_search,
-        "read_note":       _scoped_read,
-        "list_notes":      _scoped_list,
-        "edit_note":       _scoped_edit,
-        "create_note":     _scoped_create,
-        "move_note":       _scoped_move,
-        "delete_note":     _scoped_delete,
-        "add_tags":        _scoped_add_tags,
-        "ensure_settings": _scoped_ensure_settings,
+        "search_vault":    lambda args: tool_search_vault(db=db, **args),
+        "get_neighbors":   lambda args: tool_get_neighbors(db=db, **args),
+        "graph_search":    lambda args: tool_graph_search(db=db, **args),
+        "read_note":       lambda args: tool_read_note(db=db, **args),
+        "list_notes":      lambda _: tool_list_notes(db=db),
+        "edit_note":       lambda args: tool_edit_note(db=db, **args),
+        "create_note":     lambda args: tool_create_note(db=db, **args),
+        "move_note":       lambda args: tool_move_note(db=db, **args),
+        "delete_note":     lambda args: tool_delete_note(db=db, **args),
+        "add_tags":        lambda args: tool_add_tags(db=db, **args),
+        "ensure_settings": lambda args: tool_ensure_settings(args.get("vault") or vault or "", db=db),
     }
 
     bad_format_streak = 0
@@ -1207,14 +1287,12 @@ def summarize_meeting(note_id: str, vault: Optional[str] = None) -> dict:
 
 
 def vault_review(vault: Optional[str] = None) -> dict:
-    """Revisão eficiente do vault usando ChromaDB para descoberta de correlações.
-    Zero chamadas LLM na fase de descoberta — só Python + vetores.
-    Lê do CouchDB apenas as notas que realmente precisam de atualização."""
-    db = vault
+    """Revisão do vault via ChromaDB (zero LLM). Uma coleção por vault.
+    Descobre correlações vetoriais e adiciona wiki links nas notas."""
+    db                   = vault
     SIMILARITY_THRESHOLD = 0.78
-    MAX_LINKS_PER_NOTE = 5
+    MAX_LINKS_PER_NOTE   = 5
 
-    # 1. Lista todas as notas ativas
     note_ids_raw = tool_list_notes(db=db)
     try:
         all_note_ids = set(json.loads(note_ids_raw))
@@ -1224,81 +1302,75 @@ def vault_review(vault: Optional[str] = None) -> dict:
     if not all_note_ids:
         return {"answer": "Vault vazio.", "sources": []}
 
-    cols = _get_all_collections()
-    if not cols:
-        return {"answer": "ChromaDB sem coleções — vault ainda não indexado pelo watcher.", "sources": []}
+    vault_name = vault or COUCHDB_DB
+    chroma     = get_chroma()
 
-    chroma = get_chroma()
+    try:
+        col  = chroma.get_collection(_col_name(vault_name))
+        data = col.get(include=["embeddings", "metadatas"])
+    except Exception:
+        return {"answer": "ChromaDB: vault não indexado — execute o watcher primeiro.", "sources": []}
 
-    # 2. Coleta um embedding representativo por nota diretamente do ChromaDB (sem LLM)
-    note_embeddings = {}  # note_id -> embedding
-    for col_name in cols:
-        try:
-            col = chroma.get_collection(col_name)
-            data = col.get(include=["embeddings", "metadatas"])
-            for emb, meta in zip(data["embeddings"], data["metadatas"]):
-                nid = meta.get("note_id", "")
-                if nid and nid in all_note_ids and not _is_settings_note(nid) and nid not in note_embeddings:
-                    note_embeddings[nid] = emb
-        except Exception as e:
-            log.warning(f"vault_review: erro ao ler coleção {col_name}: {e}")
+    # Embedding representativo por nota (primeiro chunk)
+    note_embeddings: dict[str, list] = {}
+    for emb, meta in zip(data["embeddings"], data["metadatas"]):
+        nid = meta.get("note_id", "")
+        if nid and nid in all_note_ids and not _is_settings_note(nid) and nid not in note_embeddings:
+            note_embeddings[nid] = emb
 
     if not note_embeddings:
-        return {"answer": "Nenhuma nota indexada no ChromaDB. Execute o watcher primeiro.", "sources": []}
+        return {"answer": "Nenhuma nota indexada no ChromaDB.", "sources": []}
 
-    log.info(f"vault_review: {len(note_embeddings)} notas com embedding")
+    log.info(f"vault_review: {len(note_embeddings)} notas, buscando correlações ≥ {SIMILARITY_THRESHOLD}")
 
-    # 3. Para cada nota, busca similares via ChromaDB (O(n) queries vetoriais, sem LLM)
-    note_to_similar = {}
+    # Correlações via queries vetoriais (sem LLM)
+    note_to_similar: dict[str, list] = {}
     for note_id, embedding in note_embeddings.items():
-        similars = []
-        seen_ids = {note_id}
-        for col_name in cols:
-            try:
-                col = chroma.get_collection(col_name)
-                results = col.query(query_embeddings=[embedding], n_results=8,
-                                    include=["metadatas", "distances"])
-                for meta, dist in zip(results["metadatas"][0], results["distances"][0]):
-                    sim_id = meta.get("note_id", "")
-                    score = round(1 - dist, 3)
-                    if (sim_id and sim_id not in seen_ids and score >= SIMILARITY_THRESHOLD
-                            and not _is_settings_note(sim_id) and sim_id in all_note_ids):
-                        similars.append((sim_id, score))
-                        seen_ids.add(sim_id)
-            except Exception:
-                pass
-        if similars:
-            note_to_similar[note_id] = sorted(similars, key=lambda x: -x[1])[:MAX_LINKS_PER_NOTE]
+        try:
+            r = col.query(
+                query_embeddings=[embedding],
+                n_results=MAX_LINKS_PER_NOTE + 2,
+                include=["metadatas", "distances"],
+            )
+            seen, similars = {note_id}, []
+            for meta, dist in zip(r["metadatas"][0], r["distances"][0]):
+                sim_id = meta.get("note_id", "")
+                score  = round(1 - dist, 3)
+                if sim_id and sim_id not in seen and score >= SIMILARITY_THRESHOLD \
+                        and not _is_settings_note(sim_id) and sim_id in all_note_ids:
+                    similars.append((sim_id, score))
+                    seen.add(sim_id)
+            if similars:
+                note_to_similar[note_id] = sorted(similars, key=lambda x: -x[1])[:MAX_LINKS_PER_NOTE]
+        except Exception:
+            pass
 
-    log.info(f"vault_review: {len(note_to_similar)} notas com correlações acima de {SIMILARITY_THRESHOLD}")
+    log.info(f"vault_review: {len(note_to_similar)} notas com correlações")
 
-    # 4. Lê e atualiza apenas as notas com links faltando (O(k) leituras CouchDB, k << n)
+    # Lê apenas notas com links faltando (k << n)
     edited = []
     for note_id, similars in note_to_similar.items():
         content = tool_read_note(note_id, db=db)
         if content.startswith("Erro") or content == "(nota vazia)":
             continue
 
-        # 4a. Corrige wiki links sem alias via regex (sem LLM)
+        # Corrige wiki links sem alias via regex
         new_content = re.sub(
             r'\[\[([^|\]\n]+)\]\]',
             lambda m: f'[[{m.group(1)}|{m.group(1).split("/")[-1].replace("-", " ").title()}]]',
             content,
         )
 
-        # 4b. Filtra correlações ainda não linkadas
         missing = [(sid, sc) for sid, sc in similars if f'[[{sid}' not in new_content]
         if not missing and new_content == content:
             continue
 
-        # 4c. Adiciona/atualiza seção "## Notas Relacionadas"
         if missing:
             links_md = "\n".join(
                 f"- [[{sid}|{sid.split('/')[-1].replace('-', ' ').title()}]]"
                 for sid, _ in missing
             )
             if "## Notas Relacionadas" in new_content:
-                # Acrescenta ao final da seção existente
                 new_content = re.sub(
                     r'(## Notas Relacionadas\n)',
                     lambda m: m.group(1) + links_md + "\n",
@@ -1309,21 +1381,18 @@ def vault_review(vault: Optional[str] = None) -> dict:
 
         tool_edit_note(note_id, new_content, db=db)
         edited.append(note_id)
-        log.info(f"vault_review: {note_id} — {len(missing)} link(s) adicionado(s)")
+        log.info(f"vault_review: {note_id} +{len(missing)} link(s)")
 
     if not edited:
         return {
-            "answer": (
-                f"Vault revisado: {len(note_embeddings)} notas analisadas via ChromaDB.\n"
-                f"Nenhuma atualização necessária — todos os links já estão presentes."
-            ),
+            "answer": f"Vault revisado: {len(note_embeddings)} notas analisadas. Nenhuma atualização necessária.",
             "sources": [],
         }
 
     return {
         "answer": (
-            f"Vault revisado: {len(note_embeddings)} notas analisadas via ChromaDB (sem chamadas LLM).\n"
-            f"{len(edited)} nota(s) atualizada(s) com links de correlação semântica:\n\n"
+            f"Vault revisado via ChromaDB — {len(note_embeddings)} notas, zero chamadas LLM.\n"
+            f"{len(edited)} nota(s) atualizada(s):\n\n"
             + "\n".join(f"- `{n}`" for n in edited)
         ),
         "sources": edited,
