@@ -876,13 +876,13 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "ensure_settings",
-            "description": "Cria os arquivos de configuração do agente (profile.md e load.md) em 00-settings/ se não existirem.",
+            "description": "Cria os arquivos de configuração do agente (profile.md e load.md) em 00-meta/config/ se não existirem.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "root": {"type": "string", "description": "Pasta raiz do vault"},
+                    "vault": {"type": "string", "description": "Nome do vault (banco de dados CouchDB)"},
                 },
-                "required": ["root"],
+                "required": ["vault"],
             },
         },
     },
@@ -924,7 +924,7 @@ FORMATO OBRIGATÓRIO — SEM EXCEÇÃO:
 {"tool": "move_note", "args": {"source_id": "caminho/atual.md", "dest_id": "caminho/novo.md"}}
 {"tool": "delete_note", "args": {"note_id": "caminho/nota.md"}}
 {"tool": "add_tags", "args": {"note_id": "caminho/nota.md", "tags": ["tag1", "tag2"]}}
-{"tool": "ensure_settings", "args": {"root": "nome-do-vault"}}
+{"tool": "ensure_settings", "args": {"vault": "nome-do-vault"}}
 {"tool": "done", "args": {"answer": "resumo completo do que foi feito"}}
 
 REGRAS DE EXECUÇÃO:
