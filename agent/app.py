@@ -16,6 +16,7 @@ logging.basicConfig(
     format="%(asctime)s [agent] %(levelname)s — %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+log = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app)
