@@ -9,7 +9,7 @@ import logging
 import threading
 from flask import Flask, request, jsonify, render_template_string, Response, stream_with_context
 from flask_cors import CORS
-from agent import ask, weekly_summary, market_insights, summarize_meeting, vault_review, repair_vault, purge_vault, purge_orphan_leaves, ingest_file, ingest_url, ingest_zip, get_vaults
+from agent import ask, weekly_summary, summarize_meeting, vault_review, repair_vault, purge_vault, purge_orphan_leaves, ingest_file, ingest_url, ingest_zip, get_vaults, stop_agent, reset_stop
 
 logging.basicConfig(
     level=logging.INFO,
@@ -90,6 +90,8 @@ HTML = """<!DOCTYPE html>
   .btn-send{background:var(--accent);border:none;color:#fff;padding:0 18px;border-radius:8px;font-size:14px;cursor:pointer;font-family:'Inter',sans-serif;font-weight:500;height:44px;white-space:nowrap}
   .btn-send:hover{opacity:.85}
   .btn-send:disabled{opacity:.4;cursor:not-allowed}
+  .btn-stop{background:#ef4444;border:none;color:#fff;padding:0 14px;border-radius:8px;font-size:13px;cursor:pointer;font-family:'Inter',sans-serif;font-weight:500;height:44px;white-space:nowrap;display:none}
+  .btn-stop:hover{opacity:.85}
   .drop-overlay{position:fixed;inset:0;background:rgba(79,127,255,.15);border:2px dashed var(--accent);z-index:999;display:none;align-items:center;justify-content:center;font-size:20px;color:var(--accent);pointer-events:none}
   .drop-overlay.active{display:flex}
 </style>
@@ -120,8 +122,7 @@ HTML = """<!DOCTYPE html>
     <button class="s-btn" onclick="promptURL()">🔗 URL / Artigo</button>
     <div class="s-label">Ações rápidas</div>
     <button class="s-btn" onclick="runAction('weekly')">📅 Resumo semanal</button>
-    <button class="s-btn" onclick="runAction('insights')">💡 Insights de mercado</button>
-    <button class="s-btn" onclick="runAction('vault-review')">🔗 Revisar vault</button>
+    <button class="s-btn" onclick="reindex()">🔄 Reindexar vault</button>
     <div class="s-label">Filtrar busca</div>
     <button class="s-btn active" id="f-all" onclick="setFilter(null,this)">🗂 Tudo</button>
     <div id="filter-roots"></div>
@@ -143,6 +144,7 @@ HTML = """<!DOCTYPE html>
         <button class="btn-icon" title="Salvar arquivo no vault"  onclick="document.getElementById('inp-ingest').click()">📎</button>
         <textarea id="input" placeholder="Pergunte algo... (Enter envia, Shift+Enter nova linha)"
           onkeydown="handleKey(event)" oninput="autoResize(this)" rows="1"></textarea>
+        <button class="btn-stop" id="stop-btn" onclick="stopAgent()">⏹ Stop</button>
         <button class="btn-send" id="send-btn" onclick="sendMessage()">Enviar</button>
       </div>
     </div>
@@ -308,7 +310,7 @@ HTML = """<!DOCTYPE html>
 
     input.value = '';
     input.style.height = 'auto';
-    document.getElementById('send-btn').disabled = true;
+    setBusy(true);
 
     var userLabel = hasFile ? ('📎 ' + attachedFile.file.name + (q ? '\\n' + q : '')) : q;
     appendMsg('user', userLabel);
@@ -326,7 +328,7 @@ HTML = """<!DOCTYPE html>
         removeTyping();
         appendMsg('agent', d.answer, d.sources);
       } catch(e) { removeTyping(); appendMsg('agent', '❌ Erro ao importar arquivo.'); }
-      document.getElementById('send-btn').disabled = false;
+      setBusy(false);
       input.focus(); return;
     }
 
@@ -376,7 +378,7 @@ HTML = """<!DOCTYPE html>
       removeProgPanel(); removeTyping();
       appendMsg('agent', '❌ Erro de conexão com o agente. Verifique os logs.');
     }
-    document.getElementById('send-btn').disabled = false;
+    setBusy(false);
     input.focus();
   }
 
@@ -384,7 +386,7 @@ HTML = """<!DOCTYPE html>
   async function uploadFile(file) {
     appendMsg('user', (file.name.endsWith('.zip') ? '🗜 ' : '📄 ') + 'Importando: ' + file.name);
     appendTyping();
-    document.getElementById('send-btn').disabled = true;
+    setBusy(true);
     var form = new FormData();
     form.append('file', file);
     if (getRoot()) form.append('vault', getRoot());
@@ -393,7 +395,7 @@ HTML = """<!DOCTYPE html>
       var d = await r.json();
       removeTyping(); appendMsg('agent', d.answer, d.sources);
     } catch(e) { removeTyping(); appendMsg('agent', '❌ Erro ao importar.'); }
-    document.getElementById('send-btn').disabled = false;
+    setBusy(false);
   }
 
   async function promptURL() {
@@ -401,26 +403,50 @@ HTML = """<!DOCTYPE html>
     if (!url || !url.startsWith('http')) return;
     appendMsg('user', '🔗 ' + url);
     appendTyping();
-    document.getElementById('send-btn').disabled = true;
+    setBusy(true);
     try {
       var r = await fetch('/api/upload-url', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url:url, vault:getRoot()})});
       var d = await r.json();
       removeTyping(); appendMsg('agent', d.answer, d.sources);
     } catch(e) { removeTyping(); appendMsg('agent', '❌ Erro ao importar URL.'); }
-    document.getElementById('send-btn').disabled = false;
+    setBusy(false);
   }
 
   async function runAction(action) {
-    var labels = {weekly:'📅 Resumo semanal', insights:'💡 Insights de mercado', 'vault-review':'🔗 Revisar vault'};
+    var labels = {weekly:'📅 Resumo semanal'};
     appendMsg('user', labels[action] + (getRoot() ? ' (' + getRoot() + ')' : ''));
     appendTyping();
-    document.getElementById('send-btn').disabled = true;
+    setBusy(true);
     try {
       var r = await fetch('/api/' + action, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({vault:getRoot()})});
       var d = await r.json();
       removeTyping(); appendMsg('agent', d.answer, d.sources);
     } catch(e) { removeTyping(); appendMsg('agent', '❌ Erro ao executar ação.'); }
-    document.getElementById('send-btn').disabled = false;
+    setBusy(false);
+  }
+
+  async function reindex() {
+    appendMsg('user', '🔄 Reindexar vault' + (getRoot() ? ' (' + getRoot() + ')' : ''));
+    appendTyping();
+    setBusy(true);
+    try {
+      var r = await fetch('/api/reindex', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({vault:getRoot()})});
+      var d = await r.json();
+      removeTyping(); appendMsg('agent', d.answer, d.sources);
+    } catch(e) { removeTyping(); appendMsg('agent', '❌ Erro ao reindexar.'); }
+    setBusy(false);
+  }
+
+  async function stopAgent() {
+    try { await fetch('/api/stop', {method:'POST'}); } catch(e) {}
+    setBusy(false);
+    removeTyping(); removeProgPanel();
+    appendMsg('agent', '⛔ Operação interrompida.');
+  }
+
+  function setBusy(on) {
+    document.getElementById('send-btn').disabled = on;
+    document.getElementById('stop-btn').style.display = on ? 'block' : 'none';
   }
 
   // ── Drag & drop ──────────────────────────────────────────────────────────────
@@ -666,22 +692,24 @@ def api_analyze_stream():
     )
 
 
+@app.route("/api/stop", methods=["POST"])
+def api_stop():
+    stop_agent()
+    return jsonify({"status": "stopped"})
+
+
+@app.route("/api/reindex", methods=["POST"])
+def api_reindex():
+    data  = request.get_json(silent=True) or {}
+    vault = data.get("vault") or None
+    return jsonify(vault_review(vault=vault))
+
+
 @app.route("/api/weekly", methods=["POST"])
 def api_weekly():
     data = request.get_json(silent=True) or {}
     return jsonify(weekly_summary(vault=data.get("vault") or None))
 
-
-@app.route("/api/insights", methods=["POST"])
-def api_insights():
-    data = request.get_json(silent=True) or {}
-    return jsonify(market_insights(vault=data.get("vault") or None))
-
-
-@app.route("/api/vault-review", methods=["POST"])
-def api_vault_review():
-    data = request.get_json(silent=True) or {}
-    return jsonify(vault_review(vault=data.get("vault") or None))
 
 
 @app.route("/api/repair", methods=["POST"])

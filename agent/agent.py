@@ -39,8 +39,19 @@ def _col_name(vault: str) -> str:
 
 MAX_ROUNDS = 200
 
-_embed_model = None
-_chroma      = None
+_embed_model  = None
+_chroma       = None
+_stop_event   = __import__("threading").Event()
+
+
+def stop_agent():
+    """Sinaliza o loop de tool calling para parar."""
+    _stop_event.set()
+
+
+def reset_stop():
+    """Limpa o sinal de stop antes de iniciar nova operação."""
+    _stop_event.clear()
 
 # Palavras-chave que indicam trabalho pendente na resposta de "done"
 _PENDING_PATTERNS = [
@@ -1138,6 +1149,7 @@ def ask(question: str, collections: Optional[list] = None, vault: Optional[str] 
         "ensure_settings": lambda args: tool_ensure_settings(args.get("vault") or vault or "", db=db),
     }
 
+    reset_stop()
     bad_format_streak = 0
     rounds = 0
 
@@ -1168,6 +1180,10 @@ def ask(question: str, collections: Optional[list] = None, vault: Optional[str] 
                 return {"answer": "Agente travou em loop de formato inválido após 5 tentativas consecutivas.", "sources": list(set(sources))}
             messages.append({"role": "user", "content": "Responda APENAS com um JSON válido. Nenhum texto antes ou depois."})
             continue
+
+        if _stop_event.is_set():
+            log.info("Agente parado pelo usuário")
+            return {"answer": "⛔ Operação interrompida pelo usuário.", "sources": list(set(sources))}
 
         bad_format_streak = 0
         tool = call.get("tool")
