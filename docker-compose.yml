@@ -32,7 +32,6 @@ services:
     environment:
       COUCHDB_USER: ${COUCHDB_USER}
       COUCHDB_PASSWORD: ${COUCHDB_PASSWORD}
-      COUCHDB_DB: ${COUCHDB_DB}
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
@@ -50,7 +49,6 @@ services:
         curl -sf -u "$COUCHDB_USER:$COUCHDB_PASSWORD" -X PUT -H "Content-Type: application/json" "$$B/cors/headers" -d '"accept, authorization, content-type, origin, referer"' && echo "OK cors/headers" || echo "FAIL cors/headers"
         curl -sf -u "$COUCHDB_USER:$COUCHDB_PASSWORD" -X PUT "http://couchdb:5984/_users" && echo "DB _users criado" || echo "DB _users ja existe"
         curl -sf -u "$COUCHDB_USER:$COUCHDB_PASSWORD" -X PUT "http://couchdb:5984/_replicator" && echo "DB _replicator criado" || echo "DB _replicator ja existe"
-        curl -sf -u "$COUCHDB_USER:$COUCHDB_PASSWORD" -X PUT "http://couchdb:5984/$COUCHDB_DB" && echo "DB criado" || echo "DB ja existe"
         echo "CouchDB configurado com sucesso."
 
   chromadb:
@@ -77,7 +75,6 @@ services:
       COUCHDB_URL: http://couchdb:5984
       COUCHDB_USER: ${COUCHDB_USER}
       COUCHDB_PASSWORD: ${COUCHDB_PASSWORD}
-      COUCHDB_DB: ${COUCHDB_DB}
       CHROMADB_HOST: chromadb
       CHROMADB_PORT: 8000
     depends_on:
@@ -98,7 +95,6 @@ services:
       COUCHDB_URL: http://couchdb:5984
       COUCHDB_USER: ${COUCHDB_USER}
       COUCHDB_PASSWORD: ${COUCHDB_PASSWORD}
-      COUCHDB_DB: ${COUCHDB_DB}
       CHROMADB_HOST: chromadb
       CHROMADB_PORT: 8000
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
