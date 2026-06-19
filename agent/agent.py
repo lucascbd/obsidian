@@ -510,7 +510,23 @@ def _extract_text_from_url(url: str) -> str:
     """Busca URL e extrai texto em markdown."""
     import markdownify
     from bs4 import BeautifulSoup
-    r = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Referer": "https://www.google.com/",
+        "DNT": "1",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+    }
+    session = requests.Session()
+    r = session.get(url, timeout=30, headers=headers, allow_redirects=True)
+    if r.status_code == 403:
+        raise Exception(
+            f"403 Forbidden — o site bloqueou o acesso automático. "
+            f"Copie o texto da página e importe como arquivo .txt."
+        )
     r.raise_for_status()
     ct = r.headers.get("content-type", "")
     if "pdf" in ct:
