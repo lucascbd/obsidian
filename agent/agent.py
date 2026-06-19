@@ -1207,9 +1207,124 @@ def summarize_meeting(note_id: str, vault: Optional[str] = None) -> dict:
 
 
 def vault_review(vault: Optional[str] = None) -> dict:
-    return ask(
-        "Liste todas as notas do vault. Para cada nota que tiver wiki links no formato [[caminho/Nota]] sem alias, "
-        "leia a nota e corrija para [[caminho/Nota|Nota]]. Também identifique correlações óbvias entre notas e adicione links onde pertinente. "
-        "Reporte quais notas foram modificadas.",
-        vault=vault,
-    )
+    """Revisão eficiente do vault usando ChromaDB para descoberta de correlações.
+    Zero chamadas LLM na fase de descoberta — só Python + vetores.
+    Lê do CouchDB apenas as notas que realmente precisam de atualização."""
+    db = vault
+    SIMILARITY_THRESHOLD = 0.78
+    MAX_LINKS_PER_NOTE = 5
+
+    # 1. Lista todas as notas ativas
+    note_ids_raw = tool_list_notes(db=db)
+    try:
+        all_note_ids = set(json.loads(note_ids_raw))
+    except Exception:
+        return {"answer": "Erro ao listar notas.", "sources": []}
+
+    if not all_note_ids:
+        return {"answer": "Vault vazio.", "sources": []}
+
+    cols = _get_all_collections()
+    if not cols:
+        return {"answer": "ChromaDB sem coleções — vault ainda não indexado pelo watcher.", "sources": []}
+
+    chroma = get_chroma()
+
+    # 2. Coleta um embedding representativo por nota diretamente do ChromaDB (sem LLM)
+    note_embeddings = {}  # note_id -> embedding
+    for col_name in cols:
+        try:
+            col = chroma.get_collection(col_name)
+            data = col.get(include=["embeddings", "metadatas"])
+            for emb, meta in zip(data["embeddings"], data["metadatas"]):
+                nid = meta.get("note_id", "")
+                if nid and nid in all_note_ids and not _is_settings_note(nid) and nid not in note_embeddings:
+                    note_embeddings[nid] = emb
+        except Exception as e:
+            log.warning(f"vault_review: erro ao ler coleção {col_name}: {e}")
+
+    if not note_embeddings:
+        return {"answer": "Nenhuma nota indexada no ChromaDB. Execute o watcher primeiro.", "sources": []}
+
+    log.info(f"vault_review: {len(note_embeddings)} notas com embedding")
+
+    # 3. Para cada nota, busca similares via ChromaDB (O(n) queries vetoriais, sem LLM)
+    note_to_similar = {}
+    for note_id, embedding in note_embeddings.items():
+        similars = []
+        seen_ids = {note_id}
+        for col_name in cols:
+            try:
+                col = chroma.get_collection(col_name)
+                results = col.query(query_embeddings=[embedding], n_results=8,
+                                    include=["metadatas", "distances"])
+                for meta, dist in zip(results["metadatas"][0], results["distances"][0]):
+                    sim_id = meta.get("note_id", "")
+                    score = round(1 - dist, 3)
+                    if (sim_id and sim_id not in seen_ids and score >= SIMILARITY_THRESHOLD
+                            and not _is_settings_note(sim_id) and sim_id in all_note_ids):
+                        similars.append((sim_id, score))
+                        seen_ids.add(sim_id)
+            except Exception:
+                pass
+        if similars:
+            note_to_similar[note_id] = sorted(similars, key=lambda x: -x[1])[:MAX_LINKS_PER_NOTE]
+
+    log.info(f"vault_review: {len(note_to_similar)} notas com correlações acima de {SIMILARITY_THRESHOLD}")
+
+    # 4. Lê e atualiza apenas as notas com links faltando (O(k) leituras CouchDB, k << n)
+    edited = []
+    for note_id, similars in note_to_similar.items():
+        content = tool_read_note(note_id, db=db)
+        if content.startswith("Erro") or content == "(nota vazia)":
+            continue
+
+        # 4a. Corrige wiki links sem alias via regex (sem LLM)
+        new_content = re.sub(
+            r'\[\[([^|\]\n]+)\]\]',
+            lambda m: f'[[{m.group(1)}|{m.group(1).split("/")[-1].replace("-", " ").title()}]]',
+            content,
+        )
+
+        # 4b. Filtra correlações ainda não linkadas
+        missing = [(sid, sc) for sid, sc in similars if f'[[{sid}' not in new_content]
+        if not missing and new_content == content:
+            continue
+
+        # 4c. Adiciona/atualiza seção "## Notas Relacionadas"
+        if missing:
+            links_md = "\n".join(
+                f"- [[{sid}|{sid.split('/')[-1].replace('-', ' ').title()}]]"
+                for sid, _ in missing
+            )
+            if "## Notas Relacionadas" in new_content:
+                # Acrescenta ao final da seção existente
+                new_content = re.sub(
+                    r'(## Notas Relacionadas\n)',
+                    lambda m: m.group(1) + links_md + "\n",
+                    new_content, count=1,
+                )
+            else:
+                new_content = new_content.rstrip() + f"\n\n## Notas Relacionadas\n{links_md}\n"
+
+        tool_edit_note(note_id, new_content, db=db)
+        edited.append(note_id)
+        log.info(f"vault_review: {note_id} — {len(missing)} link(s) adicionado(s)")
+
+    if not edited:
+        return {
+            "answer": (
+                f"Vault revisado: {len(note_embeddings)} notas analisadas via ChromaDB.\n"
+                f"Nenhuma atualização necessária — todos os links já estão presentes."
+            ),
+            "sources": [],
+        }
+
+    return {
+        "answer": (
+            f"Vault revisado: {len(note_embeddings)} notas analisadas via ChromaDB (sem chamadas LLM).\n"
+            f"{len(edited)} nota(s) atualizada(s) com links de correlação semântica:\n\n"
+            + "\n".join(f"- `{n}`" for n in edited)
+        ),
+        "sources": edited,
+    }
