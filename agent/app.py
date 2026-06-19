@@ -9,7 +9,7 @@ import logging
 import threading
 from flask import Flask, request, jsonify, render_template_string, Response, stream_with_context
 from flask_cors import CORS
-from agent import ask, weekly_summary, summarize_meeting, vault_review, repair_vault, purge_vault, purge_orphan_leaves, ingest_file, ingest_url, ingest_zip, get_vaults, stop_agent, reset_stop
+from agent import ask, weekly_summary, summarize_meeting, vault_review, normalize_tags, repair_vault, purge_vault, purge_orphan_leaves, ingest_file, ingest_url, ingest_zip, get_vaults, stop_agent, reset_stop
 
 logging.basicConfig(
     level=logging.INFO,
@@ -123,6 +123,7 @@ HTML = """<!DOCTYPE html>
     <div class="s-label">Ações rápidas</div>
     <button class="s-btn" onclick="runAction('weekly')">📅 Resumo semanal</button>
     <button class="s-btn" onclick="reindex()">🔄 Reindexar vault</button>
+    <button class="s-btn" onclick="normalizeTags()">🏷️ Normalizar tags</button>
     <div class="s-label">Filtrar busca</div>
     <button class="s-btn active" id="f-all" onclick="setFilter(null,this)">🗂 Tudo</button>
     <div id="filter-roots"></div>
@@ -425,6 +426,18 @@ HTML = """<!DOCTYPE html>
     setBusy(false);
   }
 
+  async function normalizeTags() {
+    appendMsg('user', '🏷️ Normalizar tags' + (getRoot() ? ' (' + getRoot() + ')' : ''));
+    appendTyping();
+    setBusy(true);
+    try {
+      var r = await fetch('/api/normalize-tags', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({vault:getRoot()})});
+      var d = await r.json();
+      removeTyping(); appendMsg('agent', d.answer, d.sources);
+    } catch(e) { removeTyping(); appendMsg('agent', '❌ Erro ao normalizar tags.'); }
+    setBusy(false);
+  }
+
   async function reindex() {
     appendMsg('user', '🔄 Reindexar vault' + (getRoot() ? ' (' + getRoot() + ')' : ''));
     appendTyping();
@@ -696,6 +709,13 @@ def api_analyze_stream():
 def api_stop():
     stop_agent()
     return jsonify({"status": "stopped"})
+
+
+@app.route("/api/normalize-tags", methods=["POST"])
+def api_normalize_tags():
+    data  = request.get_json(silent=True) or {}
+    vault = data.get("vault") or None
+    return jsonify(normalize_tags(vault=vault))
 
 
 @app.route("/api/reindex", methods=["POST"])

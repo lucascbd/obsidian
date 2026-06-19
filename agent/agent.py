@@ -7,6 +7,7 @@ import re
 import io
 import json
 import logging
+import unicodedata
 import requests
 import chromadb
 from typing import Optional
@@ -1287,6 +1288,101 @@ def _build_actions_summary(sources: list, messages: list) -> str:
         parts.append(f"{counts['tags']} tag(s) adicionada(s)")
 
     return ", ".join(parts) if parts else f"{len(set(sources))} nota(s) afetada(s)"
+
+
+# ── Normalização de tags (operação mecânica, sem LLM) ────────────────────────
+def _normalize_tag(tag: str) -> str:
+    """Lowercase, sem acentos, espaços e underscores → hífens, remove chars especiais."""
+    tag = unicodedata.normalize("NFD", tag)
+    tag = "".join(c for c in tag if unicodedata.category(c) != "Mn")
+    tag = tag.lower().strip()
+    tag = re.sub(r"[\s_]+", "-", tag)
+    tag = re.sub(r"[^a-z0-9\-]", "", tag)
+    tag = re.sub(r"-+", "-", tag).strip("-")
+    return tag
+
+
+def normalize_tags(vault: Optional[str] = None) -> dict:
+    """Lê todas as notas do vault, normaliza tags no frontmatter (sem LLM).
+    Regras: lowercase, sem acentos, espaços → hífens."""
+    db = vault or COUCHDB_DB
+    _db = db
+
+    r = requests.get(
+        f"{COUCHDB_URL}/{_db}/_all_docs",
+        params={"include_docs": True},
+        auth=COUCHDB_AUTH, timeout=30,
+    )
+    r.raise_for_status()
+    rows = r.json().get("rows", [])
+
+    updated, skipped, errors = [], [], []
+
+    for row in rows:
+        doc = row.get("doc", {})
+        nid = row["id"]
+        if (nid.startswith("_") or nid.startswith("h:")
+                or doc.get("deleted") or _is_settings_note(nid)):
+            continue
+
+        try:
+            content = _read_note_content(doc, db=_db)
+        except Exception as e:
+            errors.append(f"{nid}: {e}")
+            continue
+
+        if not content or "tags:" not in content:
+            skipped.append(nid)
+            continue
+
+        # Extrai e normaliza tags do frontmatter
+        def _fix_tags_block(m):
+            block = m.group(0)
+            lines = block.split("\n")
+            new_lines = []
+            for line in lines:
+                # linha de item de tag: "  - Valor Com Espaço"
+                item = re.match(r"^(\s*[-*]\s*)(.+)$", line)
+                if item:
+                    prefix, raw_tag = item.group(1), item.group(2).strip().strip("\"'")
+                    normalized = _normalize_tag(raw_tag)
+                    if normalized:
+                        new_lines.append(f"{prefix}{normalized}")
+                    # descarta tags que viraram vazias
+                else:
+                    new_lines.append(line)
+            return "\n".join(new_lines)
+
+        new_content = re.sub(
+            r"^tags:.*?(?=\n\S|\Z)",
+            _fix_tags_block,
+            content,
+            flags=re.MULTILINE | re.DOTALL,
+        )
+
+        if new_content == content:
+            skipped.append(nid)
+            continue
+
+        try:
+            ok = _write_note_content(doc, new_content, db=_db)
+            if ok:
+                updated.append(nid)
+                log.info(f"normalize_tags: {nid}")
+            else:
+                errors.append(f"{nid}: falha ao salvar")
+        except Exception as e:
+            errors.append(f"{nid}: {e}")
+
+    lines = [f"**{len(updated)} nota(s) atualizadas**, {len(skipped)} sem mudança, {len(errors)} erro(s)."]
+    if updated:
+        lines.append("\n**Atualizadas:**")
+        lines.extend(f"- `{n}`" for n in updated)
+    if errors:
+        lines.append("\n**Erros:**")
+        lines.extend(f"- {e}" for e in errors)
+
+    return {"answer": "\n".join(lines), "sources": updated}
 
 
 # ── Ações rápidas ────────────────────────────────────────────────────────────
