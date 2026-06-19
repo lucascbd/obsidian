@@ -550,6 +550,7 @@ Responda APENAS com um JSON no formato:
 def ingest(raw_text: str, source_name: str, vault: Optional[str] = None, db: str = None) -> dict:
     """Converte texto bruto em nota Obsidian e salva no vault."""
     import datetime
+    db = db or vault  # vault name == CouchDB database name
     note_ids = tool_list_notes(db=db)
     today = datetime.date.today().isoformat()
 
