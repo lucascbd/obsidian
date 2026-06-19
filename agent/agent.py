@@ -80,37 +80,36 @@ def get_chroma():
 
 
 # ── CouchDB ───────────────────────────────────────────────────────────────────
-def _couch(method: str, path: str, **kwargs):
-    url = f"{COUCHDB_URL}/{COUCHDB_DB}/{requests.utils.quote(path, safe='')}"
+def _couch(method: str, path: str, db: str = None, **kwargs):
+    _db = db or COUCHDB_DB
+    url = f"{COUCHDB_URL}/{_db}/{requests.utils.quote(path, safe='')}"
     r = getattr(requests, method)(url, auth=COUCHDB_AUTH, timeout=15, **kwargs)
     r.raise_for_status()
     return r.json()
 
 
-def _read_note_content(doc: dict) -> str:
+def _read_note_content(doc: dict, db: str = None) -> str:
     parts = []
     for leaf_id in doc.get("children", []):
         try:
-            leaf = _couch("get", leaf_id)
+            leaf = _couch("get", leaf_id, db=db)
             parts.append(leaf.get("data", ""))
         except Exception:
             pass
     return "".join(parts)
 
 
-def _write_note_content(doc: dict, new_content: str) -> bool:
+def _write_note_content(doc: dict, new_content: str, db: str = None) -> bool:
     import time
 
     children = doc.get("children", [])
     if not children:
         return False
 
-    # Divide conteúdo proporcionalmente entre os leaves existentes
-    # ou usa um único leaf se houver apenas um
     leaves = []
     for leaf_id in children:
         try:
-            leaves.append(_couch("get", leaf_id))
+            leaves.append(_couch("get", leaf_id, db=db))
         except Exception:
             return False
 
@@ -124,17 +123,35 @@ def _write_note_content(doc: dict, new_content: str) -> bool:
             chunk = new_content[written:written + size]
             written += size
         leaf["data"] = chunk
-        _couch("put", leaf["_id"], json=leaf)
+        _couch("put", leaf["_id"], db=db, json=leaf)
 
-    # Re-busca o doc para garantir _rev atualizado antes do PUT final
-    fresh = _couch("get", doc["_id"])
+    fresh = _couch("get", doc["_id"], db=db)
     fresh["size"]  = len(new_content.encode("utf-8"))
     fresh["mtime"] = int(time.time() * 1000)
-    _couch("put", fresh["_id"], json=fresh)
+    _couch("put", fresh["_id"], db=db, json=fresh)
     return True
 
 
-# ── Sistema 00-settings/ ──────────────────────────────────────────────────────
+def get_vaults() -> list:
+    """Lista os bancos de dados CouchDB disponíveis (cada um é um vault)."""
+    system_dbs = {"_users", "_replicator", "_global_changes"}
+    try:
+        r = requests.get(f"{COUCHDB_URL}/_all_dbs", auth=COUCHDB_AUTH, timeout=10)
+        r.raise_for_status()
+        vaults = [v for v in r.json() if v not in system_dbs]
+        log.info(f"get_vaults: {vaults}")
+        return vaults
+    except Exception as e:
+        log.error(f"Erro ao listar vaults: {e}")
+        return []
+
+
+def get_root_folders() -> list:
+    """Alias de get_vaults() para compatibilidade."""
+    return get_vaults()
+
+
+# ── Sistema 00-meta/config/ ───────────────────────────────────────────────────
 DEFAULT_PROFILE_MD = """# Perfil do Agente
 
 Você é o Mordomo do Conhecimento — um agente autônomo que organiza, conecta e enriquece o vault Obsidian do usuário.
@@ -180,40 +197,40 @@ tags:
 """
 
 
-def load_settings(root: str) -> dict:
-    """Lê as notas de settings do vault. Retorna dict com profile, load e mem."""
+def load_settings(vault: str, db: str = None) -> dict:
+    """Lê as notas de config do vault em 00-meta/config/. Retorna dict com profile, load e mem."""
     settings = {"profile": "", "load": "", "mem": ""}
     mapping = {
-        "profile": f"{root}/00-settings/profile.md",
-        "load":    f"{root}/00-settings/load.md",
-        "mem":     f"{root}/00-settings/agent-mem.md",
+        "profile": "00-meta/config/profile.md",
+        "load":    "00-meta/config/load.md",
+        "mem":     "00-meta/config/agent-mem.md",
     }
     for key, note_id in mapping.items():
         try:
-            doc = _couch("get", note_id)
+            doc = _couch("get", note_id, db=db)
             if not doc.get("deleted"):
-                content = _read_note_content(doc)
+                content = _read_note_content(doc, db=db)
                 settings[key] = content
         except Exception:
             pass
     return settings
 
 
-def save_session_memory(root: str, question: str, answer: str, sources: list, actions_summary: str) -> None:
-    """Faz append em {root}/00-settings/agent-mem.md com o resumo da sessão."""
+def save_session_memory(vault: str, question: str, answer: str, sources: list,
+                        actions_summary: str, db: str = None) -> None:
+    """Faz append em 00-meta/config/agent-mem.md com o resumo da sessão."""
     import datetime
     try:
         from zoneinfo import ZoneInfo
         now = datetime.datetime.now(ZoneInfo("America/Sao_Paulo")).strftime("%Y-%m-%d %H:%M")
     except Exception:
         now = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M") + " UTC"
-    note_id = f"{root}/00-settings/agent-mem.md"
+    note_id = "00-meta/config/agent-mem.md"
 
-    # Bullet points das notas afetadas
     notes_bullets = "\n".join(f"- {s}" for s in sources) if sources else "- (nenhuma nota afetada)"
-
     new_entry = (
         f"\n## Sessão {now}\n"
+        f"**Vault:** {vault}\n"
         f"**Tarefa:** {question}\n"
         f"**Ações:** {actions_summary}\n"
         f"**Notas afetadas:**\n{notes_bullets}\n"
@@ -221,44 +238,44 @@ def save_session_memory(root: str, question: str, answer: str, sources: list, ac
     )
 
     try:
-        doc = _couch("get", note_id)
+        doc = _couch("get", note_id, db=db)
         if doc.get("deleted"):
             raise Exception("nota deletada")
-        existing = _read_note_content(doc)
-        _write_note_content(doc, existing + new_entry)
+        existing = _read_note_content(doc, db=db)
+        _write_note_content(doc, existing + new_entry, db=db)
     except Exception:
-        # Cria a nota se não existir
-        tool_create_note(note_id, f"# Memória de Sessões\n{new_entry}")
+        tool_create_note(note_id, f"# Memória de Sessões\n{new_entry}", db=db)
 
 
-def tool_ensure_settings(root: str) -> str:
-    """Cria {root}/00-settings/profile.md e {root}/00-settings/load.md com conteúdo padrão se não existirem."""
+def tool_ensure_settings(vault: str, db: str = None) -> str:
+    """Cria 00-meta/config/profile.md e load.md com conteúdo padrão se não existirem."""
     created = []
     for note_id, default_content in [
-        (f"{root}/00-settings/profile.md", DEFAULT_PROFILE_MD),
-        (f"{root}/00-settings/load.md",    DEFAULT_LOAD_MD),
+        ("00-meta/config/profile.md", DEFAULT_PROFILE_MD),
+        ("00-meta/config/load.md",    DEFAULT_LOAD_MD),
     ]:
         try:
-            doc = _couch("get", note_id)
+            doc = _couch("get", note_id, db=db)
             if not doc.get("deleted"):
-                continue  # já existe
+                continue
         except Exception:
             pass
-        result = tool_create_note(note_id, default_content)
+        result = tool_create_note(note_id, default_content, db=db)
         created.append(f"{note_id}: {result}")
 
     if not created:
-        return f"Arquivos de settings já existem em '{root}/00-settings/'."
+        return "Arquivos de settings já existem em '00-meta/config/'."
     return "Settings criados:\n" + "\n".join(created)
 
 
 # ── Tools disponíveis para o agente ──────────────────────────────────────────
-def purge_vault(keep_prefix: Optional[str] = None) -> dict:
+def purge_vault(keep_prefix: Optional[str] = None, db: str = None) -> dict:
     """Marca todas as notas ativas como deleted=true no CouchDB (formato LiveSync).
     keep_prefix: se fornecido, preserva notas que começam com esse prefixo."""
     import time
+    _db = db or COUCHDB_DB
     r = requests.get(
-        f"{COUCHDB_URL}/{COUCHDB_DB}/_all_docs",
+        f"{COUCHDB_URL}/{_db}/_all_docs",
         params={"include_docs": True},
         auth=COUCHDB_AUTH, timeout=30,
     )
@@ -277,7 +294,7 @@ def purge_vault(keep_prefix: Optional[str] = None) -> dict:
         try:
             doc["deleted"] = True
             doc["mtime"]   = int(time.time() * 1000)
-            _couch("put", nid, json=doc)
+            _couch("put", nid, json=doc, db=_db)
             purged.append(nid)
             log.info(f"Purged: {nid}")
         except Exception as e:
@@ -289,10 +306,11 @@ def purge_vault(keep_prefix: Optional[str] = None) -> dict:
     }
 
 
-def purge_orphan_leaves() -> dict:
+def purge_orphan_leaves(db: str = None) -> dict:
     """Remove leaf docs (h:) cujo pai está deletado ou não existe."""
+    _db = db or COUCHDB_DB
     r = requests.get(
-        f"{COUCHDB_URL}/{COUCHDB_DB}/_all_docs",
+        f"{COUCHDB_URL}/{_db}/_all_docs",
         params={"include_docs": True},
         auth=COUCHDB_AUTH, timeout=30,
     )
@@ -318,7 +336,7 @@ def purge_orphan_leaves() -> dict:
         try:
             doc = row["doc"]
             requests.delete(
-                f"{COUCHDB_URL}/{COUCHDB_DB}/{requests.utils.quote(nid, safe='')}",
+                f"{COUCHDB_URL}/{_db}/{requests.utils.quote(nid, safe='')}",
                 params={"rev": doc["_rev"]},
                 auth=COUCHDB_AUTH, timeout=10,
             ).raise_for_status()
@@ -332,10 +350,11 @@ def purge_orphan_leaves() -> dict:
     }
 
 
-def repair_vault() -> dict:
+def repair_vault(db: str = None) -> dict:
     """Corrige size mismatch em documentos do CouchDB."""
+    _db = db or COUCHDB_DB
     r = requests.get(
-        f"{COUCHDB_URL}/{COUCHDB_DB}/_all_docs",
+        f"{COUCHDB_URL}/{_db}/_all_docs",
         params={"include_docs": True},
         auth=COUCHDB_AUTH, timeout=30,
     )
@@ -345,14 +364,14 @@ def repair_vault() -> dict:
         doc = row.get("doc", {})
         if doc.get("deleted") or doc.get("type") != "plain" or doc["_id"].startswith("_") or doc["_id"].startswith("h:"):
             continue
-        content = _read_note_content(doc)
+        content = _read_note_content(doc, db=_db)
         real_size = len(content.encode("utf-8"))
         if doc.get("size", -1) != real_size:
             import time
             doc["size"] = real_size
             doc["mtime"] = int(time.time() * 1000)
             try:
-                _couch("put", doc["_id"], json=doc)
+                _couch("put", doc["_id"], json=doc, db=_db)
                 fixed.append(f"{doc['_id']} ({doc.get('size', '?')} → {real_size})")
                 log.info(f"Reparado: {doc['_id']}")
             except Exception as e:
@@ -362,37 +381,14 @@ def repair_vault() -> dict:
         "sources": fixed,
     }
 
-def get_root_folders() -> list:
-    """Retorna as pastas raiz do vault (primeiro segmento de path das notas ativas)."""
-    try:
-        r = requests.get(
-            f"{COUCHDB_URL}/{COUCHDB_DB}/_all_docs",
-            auth=COUCHDB_AUTH, timeout=30,
-        )
-        r.raise_for_status()
-        roots = set()
-        for row in r.json().get("rows", []):
-            nid = row["id"]
-            if nid.startswith("_") or nid.startswith("h:"):
-                continue
-            parts = nid.split("/")
-            if len(parts) > 1:
-                roots.add(parts[0])
-        log.info(f"get_root_folders found: {sorted(roots)}")
-        return sorted(roots)
-    except Exception as e:
-        log.error(f"Erro ao listar raízes: {e}")
-        return []
-
-
 def _is_settings_note(note_id: str) -> bool:
-    """Retorna True se a nota pertence à pasta 00-settings (em qualquer root)."""
+    """Retorna True se a nota pertence à pasta 00-meta (config do agente)."""
     parts = note_id.split("/")
-    return "00-settings" in parts
+    return "00-meta" in parts
 
 
-def tool_search_vault(query: str, collections: Optional[list] = None, root: Optional[str] = None) -> str:
-    """Busca semântica no vault via ChromaDB, opcionalmente filtrada por pasta raiz."""
+def tool_search_vault(query: str, collections: Optional[list] = None, db: str = None) -> str:
+    """Busca semântica no vault via ChromaDB."""
     cols  = collections or _get_all_collections()
     if not cols:
         return "ChromaDB sem coleções — vault ainda não indexado pelo watcher."
@@ -406,8 +402,6 @@ def tool_search_vault(query: str, collections: Optional[list] = None, root: Opti
             r   = col.query(query_embeddings=[embedding], n_results=10)
             for doc, meta, dist in zip(r["documents"][0], r["metadatas"][0], r["distances"][0]):
                 nid = meta["note_id"]
-                if root and not nid.startswith(root + "/"):
-                    continue
                 if _is_settings_note(nid):
                     continue
                 results.append({
@@ -423,34 +417,34 @@ def tool_search_vault(query: str, collections: Optional[list] = None, root: Opti
     return json.dumps(results[:8], ensure_ascii=False)
 
 
-def tool_read_note(note_id: str) -> str:
+def tool_read_note(note_id: str, db: str = None) -> str:
     """Lê o conteúdo completo de uma nota do CouchDB."""
     try:
-        doc = _couch("get", note_id)
-        content = _read_note_content(doc)
+        doc = _couch("get", note_id, db=db)
+        content = _read_note_content(doc, db=db)
         return content if content else "(nota vazia)"
     except Exception as e:
         return f"Erro ao ler nota '{note_id}': {e}"
 
 
-def tool_edit_note(note_id: str, content: str) -> str:
+def tool_edit_note(note_id: str, content: str, db: str = None) -> str:
     """Edita o conteúdo de uma nota existente no CouchDB."""
     try:
-        doc = _couch("get", note_id)
+        doc = _couch("get", note_id, db=db)
         if doc.get("deleted"):
             return f"Nota '{note_id}' está deletada."
-        ok = _write_note_content(doc, content)
+        ok = _write_note_content(doc, content, db=db)
         return f"Nota '{note_id}' atualizada com sucesso." if ok else "Falha ao salvar."
     except Exception as e:
         return f"Erro ao editar nota '{note_id}': {e}"
 
 
-def tool_list_notes(root: Optional[str] = None) -> str:
-    """Lista todas as notas ativas (não deletadas) do vault, opcionalmente filtradas por pasta raiz.
-    Exclui notas da pasta 00-settings."""
+def tool_list_notes(db: str = None) -> str:
+    """Lista todas as notas ativas (não deletadas) do vault. Exclui notas de 00-meta."""
+    _db = db or COUCHDB_DB
     try:
         r = requests.get(
-            f"{COUCHDB_URL}/{COUCHDB_DB}/_all_docs",
+            f"{COUCHDB_URL}/{_db}/_all_docs",
             params={"include_docs": True},
             auth=COUCHDB_AUTH, timeout=30,
         )
@@ -460,7 +454,6 @@ def tool_list_notes(root: Optional[str] = None) -> str:
             if not row["id"].startswith("_")
             and not row["id"].startswith("h:")
             and not row.get("doc", {}).get("deleted")
-            and (not root or row["id"].startswith(root + "/"))
             and not _is_settings_note(row["id"])
         ]
         return json.dumps(ids, ensure_ascii=False)
@@ -468,7 +461,7 @@ def tool_list_notes(root: Optional[str] = None) -> str:
         return f"Erro ao listar notas: {e}"
 
 
-def tool_create_note(path: str, content: str) -> str:
+def tool_create_note(path: str, content: str, db: str = None) -> str:
     """Cria uma nova nota no vault. path ex: '00-inbox/minha-nota.md'"""
     import hashlib, time
     note_id = path.lower()
@@ -485,8 +478,8 @@ def tool_create_note(path: str, content: str) -> str:
         "eden":     {},
     }
     try:
-        _couch("put", leaf_id, json=leaf)
-        _couch("put", note_id, json=doc)
+        _couch("put", leaf_id, db=db, json=leaf)
+        _couch("put", note_id, db=db, json=doc)
         return f"Nota '{path}' criada com sucesso."
     except Exception as e:
         return f"Erro ao criar nota: {e}"
@@ -554,26 +547,25 @@ Responda APENAS com um JSON no formato:
 {{"path": "pasta/subpasta/nome.md", "content": "conteúdo completo da nota", "summary": "1-2 frases descrevendo o que foi criado"}}"""
 
 
-def ingest(raw_text: str, source_name: str, root: Optional[str] = None) -> dict:
+def ingest(raw_text: str, source_name: str, vault: Optional[str] = None, db: str = None) -> dict:
     """Converte texto bruto em nota Obsidian e salva no vault."""
     import datetime
-    note_ids = tool_list_notes(root=root)
+    note_ids = tool_list_notes(db=db)
     today = datetime.date.today().isoformat()
 
-    root_instruction = (
-        f"\nESCOPO: A nota DEVE ser criada dentro de '{root}/'. "
-        f"O path deve começar com '{root}/'. "
-        f"NUNCA crie wiki links para notas fora de '{root}/'."
-    ) if root else ""
+    vault_instruction = (
+        f"\nESCOPO: Você está trabalhando no vault '{vault}'. "
+        f"As notas de configuração estão em '00-meta/config/'."
+    ) if vault else ""
 
-    # Carrega regras de ingestão do vault se root fornecido
+    # Carrega regras de ingestão do vault se vault fornecido
     load_rules = ""
-    if root:
-        settings = load_settings(root)
+    if vault:
+        settings = load_settings(vault, db=db)
         if settings.get("load"):
             load_rules = f"\n\nREGRAS DE INGESTÃO DO VAULT:\n{settings['load']}"
 
-    prompt = (INGEST_PROMPT + root_instruction + load_rules).replace("{note_ids}", note_ids[:3000]).replace("{today}", today)
+    prompt = (INGEST_PROMPT + vault_instruction + load_rules).replace("{note_ids}", note_ids[:3000]).replace("{today}", today)
     user_msg = f"FONTE: {source_name}\n\nCONTEÚDO:\n{raw_text[:8000]}"
 
     messages = [
@@ -602,11 +594,7 @@ def ingest(raw_text: str, source_name: str, root: Optional[str] = None) -> dict:
         content = data.get("content", raw_text[:4000])
         summary = data.get("summary", f"Nota criada a partir de {source_name}")
 
-        # Garante que o path respeita o root
-        if root and not path.startswith(root + "/"):
-            path = f"{root}/{path}"
-
-        result = tool_create_note(path, content)
+        result = tool_create_note(path, content, db=db)
         log.info(f"Ingest: {result}")
 
         return {
@@ -618,20 +606,20 @@ def ingest(raw_text: str, source_name: str, root: Optional[str] = None) -> dict:
     return {"answer": "Falha ao processar o conteúdo após 3 tentativas.", "sources": []}
 
 
-def ingest_file(filename: str, content: bytes, root: Optional[str] = None) -> dict:
+def ingest_file(filename: str, content: bytes, vault: Optional[str] = None, db: str = None) -> dict:
     raw_text = _extract_text_from_file(filename, content)
-    return ingest(raw_text, source_name=filename, root=root)
+    return ingest(raw_text, source_name=filename, vault=vault, db=db)
 
 
-def ingest_url(url: str, root: Optional[str] = None) -> dict:
+def ingest_url(url: str, vault: Optional[str] = None, db: str = None) -> dict:
     try:
         raw_text = _extract_text_from_url(url)
     except Exception as e:
         return {"answer": f"Erro ao buscar URL: {e}", "sources": []}
-    return ingest(raw_text, source_name=url, root=root)
+    return ingest(raw_text, source_name=url, vault=vault, db=db)
 
 
-def ingest_zip(content: bytes, root: Optional[str] = None) -> dict:
+def ingest_zip(content: bytes, vault: Optional[str] = None, db: str = None) -> dict:
     """Extrai um ZIP e ingere cada arquivo suportado como nota Obsidian."""
     import zipfile
     SUPPORTED = {"txt", "md", "html", "htm", "pdf", "docx"}
@@ -647,7 +635,7 @@ def ingest_zip(content: bytes, root: Optional[str] = None) -> dict:
                 try:
                     file_bytes = zf.read(name)
                     basename   = os.path.basename(name)
-                    result     = ingest_file(basename, file_bytes, root=root)
+                    result     = ingest_file(basename, file_bytes, vault=vault, db=db)
                     created.append(result.get("path", basename))
                     log.info(f"ZIP ingest OK: {result.get('path')}")
                 except Exception as e:
@@ -657,8 +645,8 @@ def ingest_zip(content: bytes, root: Optional[str] = None) -> dict:
         return {"answer": "Arquivo ZIP inválido ou corrompido.", "sources": []}
 
     lines = [f"**{len(created)} notas criadas** de {len(names)} arquivos no ZIP"]
-    if root:
-        lines.append(f"Escopo: `{root}/`")
+    if vault:
+        lines.append(f"Vault: `{vault}`")
     lines.append("")
     lines.extend(f"- `{p}`" for p in created)
     if errors:
@@ -669,16 +657,15 @@ def ingest_zip(content: bytes, root: Optional[str] = None) -> dict:
 
 
 # ── Tool calling loop ─────────────────────────────────────────────────────────
-def tool_move_note(source_id: str, dest_id: str) -> str:
-    """Move/renomeia uma nota: copia conteúdo e leaves para o novo ID e marca o original como deleted."""
+def tool_move_note(source_id: str, dest_id: str, db: str = None) -> str:
+    """Move/renomeia uma nota: copia conteúdo para o novo ID e marca o original como deleted."""
     import time, hashlib
     try:
-        src_doc = _couch("get", source_id)
+        src_doc = _couch("get", source_id, db=db)
         if src_doc.get("deleted"):
             return f"Nota '{source_id}' já está deletada."
-        content = _read_note_content(src_doc)
+        content = _read_note_content(src_doc, db=db)
 
-        # Cria novo leaf e doc no destino
         leaf_id = "h:" + hashlib.md5(f"{dest_id}{time.time()}".encode()).hexdigest()[:13]
         leaf = {"_id": leaf_id, "data": content, "type": "leaf"}
         doc  = {
@@ -691,13 +678,12 @@ def tool_move_note(source_id: str, dest_id: str) -> str:
             "type":     "plain",
             "eden":     {},
         }
-        _couch("put", leaf_id, json=leaf)
-        _couch("put", dest_id, json=doc)
+        _couch("put", leaf_id, db=db, json=leaf)
+        _couch("put", dest_id, db=db, json=doc)
 
-        # Marca original como deleted (formato LiveSync)
         src_doc["deleted"] = True
         src_doc["mtime"]   = int(time.time() * 1000)
-        _couch("put", source_id, json=src_doc)
+        _couch("put", source_id, db=db, json=src_doc)
 
         log.info(f"move_note: {source_id} → {dest_id}")
         return f"Nota movida: '{source_id}' → '{dest_id}'"
@@ -705,27 +691,27 @@ def tool_move_note(source_id: str, dest_id: str) -> str:
         return f"Erro ao mover nota: {e}"
 
 
-def tool_delete_note(note_id: str) -> str:
-    """Marca uma nota como deleted=true no CouchDB (formato LiveSync). Use apenas para duplicatas confirmadas."""
+def tool_delete_note(note_id: str, db: str = None) -> str:
+    """Marca uma nota como deleted=true no CouchDB (formato LiveSync)."""
     import time
     try:
-        doc = _couch("get", note_id)
+        doc = _couch("get", note_id, db=db)
         if doc.get("deleted"):
             return f"Nota '{note_id}' já estava deletada."
         doc["deleted"] = True
         doc["mtime"]   = int(time.time() * 1000)
-        _couch("put", note_id, json=doc)
+        _couch("put", note_id, db=db, json=doc)
         log.info(f"delete_note: {note_id}")
         return f"Nota '{note_id}' deletada."
     except Exception as e:
         return f"Erro ao deletar nota '{note_id}': {e}"
 
 
-def tool_add_tags(note_id: str, tags: list[str]) -> str:
+def tool_add_tags(note_id: str, tags: list, db: str = None) -> str:
     """Adiciona tags ao frontmatter YAML de uma nota. Cria o bloco --- se não existir. Não duplica tags já presentes."""
     try:
-        doc = _couch("get", note_id)
-        content = _read_note_content(doc)
+        doc = _couch("get", note_id, db=db)
+        content = _read_note_content(doc, db=db)
 
         # Extrai frontmatter
         if content.startswith("---"):
@@ -764,7 +750,7 @@ def tool_add_tags(note_id: str, tags: list[str]) -> str:
             updated_fm = f"tags:\n{tags_yaml}\n"
 
         new_content = f"---\n{updated_fm}\n---\n{body}"
-        ok = _write_note_content(doc, new_content)
+        ok = _write_note_content(doc, new_content, db=db)
         if not ok:
             return f"Falha ao salvar tags em '{note_id}'."
         log.info(f"add_tags: {note_id} +{new_tags}")
@@ -985,14 +971,17 @@ def _call_llm_raw(messages: list) -> str:
     return content.strip()
 
 
-def ask(question: str, collections: Optional[list] = None, root: Optional[str] = None,
+def ask(question: str, collections: Optional[list] = None, vault: Optional[str] = None,
         on_progress=None) -> dict:
-    """Loop de tool calling via prompt até o agente chamar 'done'."""
+    """Loop de tool calling via prompt até o agente chamar 'done'.
+    vault = nome do banco CouchDB a usar (se None, usa COUCHDB_DB do env)."""
+
+    db = vault  # vault name == CouchDB database name
 
     # Carrega settings do vault e injeta no system prompt
     settings_ctx = ""
-    if root:
-        settings = load_settings(root)
+    if vault:
+        settings = load_settings(vault, db=db)
         parts = []
         if settings.get("profile"):
             parts.append(f"## PERFIL DO AGENTE (do vault)\n{settings['profile']}")
@@ -1001,73 +990,47 @@ def ask(question: str, collections: Optional[list] = None, root: Optional[str] =
         if parts:
             settings_ctx = "\n\n" + "\n\n".join(parts)
 
-    root_ctx = (
-        f"\n\nESCOPO ATIVO: '{root}/'\n"
-        f"- Todas as notas criadas DEVEM começar com '{root}/'\n"
-        f"- list_notes e search_vault já retornam apenas notas de '{root}/'\n"
-        f"- NUNCA crie wiki links apontando para fora de '{root}/'\n"
-        f"- Ao criar uma nota, se o path não começar com '{root}/', adicione automaticamente"
-    ) if root else ""
+    vault_ctx = (
+        f"\n\nVAULT ATIVO: '{vault}'\n"
+        f"- Você está trabalhando no vault '{vault}' (banco de dados CouchDB separado)\n"
+        f"- As notas de configuração estão em '00-meta/config/'\n"
+        f"- list_notes e search_vault já operam sobre este vault\n"
+    ) if vault else ""
 
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT + settings_ctx + root_ctx},
+        {"role": "system", "content": SYSTEM_PROMPT + settings_ctx + vault_ctx},
         {"role": "user",   "content": question},
     ]
     sources = []
 
-    # Ferramentas com escopo de root aplicado
+    # Ferramentas com db vinculado ao vault escolhido
     def _scoped_search(args):
-        return tool_search_vault(root=root, **args)
+        return tool_search_vault(db=db, **args)
 
     def _scoped_list(_args):
-        return tool_list_notes(root=root)
+        return tool_list_notes(db=db)
 
     def _scoped_read(args):
-        nid = args.get("note_id", "")
-        if root and not nid.startswith(root + "/"):
-            return f"Bloqueado: nota '{nid}' está fora do escopo '{root}/'."
-        return tool_read_note(**args)
+        return tool_read_note(db=db, **args)
 
     def _scoped_edit(args):
-        nid = args.get("note_id", "")
-        if root and not nid.startswith(root + "/"):
-            return f"Bloqueado: nota '{nid}' está fora do escopo '{root}/'."
-        return tool_edit_note(**args)
+        return tool_edit_note(db=db, **args)
 
     def _scoped_create(args):
-        if root:
-            path = args.get("path", "")
-            if not path.startswith(root + "/"):
-                args = {**args, "path": f"{root}/{path}"}
-        return tool_create_note(**args)
+        return tool_create_note(db=db, **args)
 
     def _scoped_move(args):
-        src = args.get("source_id", "")
-        dst = args.get("dest_id", "")
-        if root:
-            if not src.startswith(root + "/"):
-                return f"Bloqueado: source '{src}' fora do escopo '{root}/'."
-            if not dst.startswith(root + "/"):
-                args = {**args, "dest_id": f"{root}/{dst}"}
-        return tool_move_note(**args)
+        return tool_move_note(db=db, **args)
 
     def _scoped_delete(args):
-        nid = args.get("note_id", "")
-        if root and not nid.startswith(root + "/"):
-            return f"Bloqueado: nota '{nid}' fora do escopo '{root}/'."
-        return tool_delete_note(**args)
+        return tool_delete_note(db=db, **args)
 
     def _scoped_add_tags(args):
-        nid = args.get("note_id", "")
-        if root and not nid.startswith(root + "/"):
-            return f"Bloqueado: nota '{nid}' fora do escopo '{root}/'."
-        return tool_add_tags(**args)
+        return tool_add_tags(db=db, **args)
 
     def _scoped_ensure_settings(args):
-        r = args.get("root") or root
-        if not r:
-            return "Erro: root não especificado."
-        return tool_ensure_settings(r)
+        v = args.get("vault") or vault or ""
+        return tool_ensure_settings(v, db=db)
 
     scoped_fns = {
         "search_vault":    _scoped_search,
@@ -1129,10 +1092,10 @@ def ask(question: str, collections: Optional[list] = None, root: Optional[str] =
                 continue
 
             # Salva memória da sessão
-            if root:
+            if vault:
                 try:
                     actions_summary = _build_actions_summary(sources, messages)
-                    save_session_memory(root, question, answer, list(set(sources)), actions_summary)
+                    save_session_memory(vault, question, answer, list(set(sources)), actions_summary, db=db)
                 except Exception as e:
                     log.warning(f"Falha ao salvar memória de sessão: {e}")
 
@@ -1160,7 +1123,7 @@ def ask(question: str, collections: Optional[list] = None, root: Optional[str] =
                 log.warning(f"on_progress callback erro: {e}")
 
         if tool in ("edit_note", "create_note", "add_tags", "ensure_settings"):
-            sources.append(args.get("note_id") or args.get("path") or args.get("root", ""))
+            sources.append(args.get("note_id") or args.get("path") or args.get("vault", ""))
         elif tool == "move_note":
             sources.append(args.get("dest_id", ""))
         elif tool == "delete_note":
@@ -1171,10 +1134,10 @@ def ask(question: str, collections: Optional[list] = None, root: Optional[str] =
     # MAX_ROUNDS atingido — salva memória parcial e retorna
     log.warning(f"MAX_ROUNDS ({MAX_ROUNDS}) atingido. Salvando memória parcial.")
     partial_answer = f"Tarefa interrompida após {MAX_ROUNDS} rounds. Trabalho parcial realizado em {len(set(sources))} nota(s)."
-    if root:
+    if vault:
         try:
             actions_summary = _build_actions_summary(sources, messages)
-            save_session_memory(root, question, partial_answer, list(set(sources)), actions_summary)
+            save_session_memory(vault, question, partial_answer, list(set(sources)), actions_summary, db=db)
         except Exception as e:
             log.warning(f"Falha ao salvar memória parcial: {e}")
     return {"answer": partial_answer, "sources": list(set(sources))}
@@ -1216,23 +1179,23 @@ def _build_actions_summary(sources: list, messages: list) -> str:
     return ", ".join(parts) if parts else f"{len(set(sources))} nota(s) afetada(s)"
 
 
-# ── Ações rápidas (mantidas para compatibilidade) ─────────────────────────────
-def weekly_summary(root: Optional[str] = None) -> dict:
-    return ask("Gere um resumo executivo semanal com: projetos em andamento e status, riscos e bloqueios, próximos passos prioritários, stakeholders que precisam de atenção.", root=root)
+# ── Ações rápidas ────────────────────────────────────────────────────────────
+def weekly_summary(vault: Optional[str] = None) -> dict:
+    return ask("Gere um resumo executivo semanal com: projetos em andamento e status, riscos e bloqueios, próximos passos prioritários, stakeholders que precisam de atenção.", vault=vault)
 
 
-def market_insights(root: Optional[str] = None) -> dict:
-    return ask("Com base nas análises e estudos registrados, identifique: principais tendências de mercado, oportunidades, riscos competitivos e gaps de conhecimento.", root=root)
+def market_insights(vault: Optional[str] = None) -> dict:
+    return ask("Com base nas análises e estudos registrados, identifique: principais tendências de mercado, oportunidades, riscos competitivos e gaps de conhecimento.", vault=vault)
 
 
-def summarize_meeting(note_id: str, root: Optional[str] = None) -> dict:
-    return ask(f"Leia a nota {note_id} e gere: resumo executivo, decisões tomadas, action items com responsável e prazo, pontos que precisam de follow-up.", root=root)
+def summarize_meeting(note_id: str, vault: Optional[str] = None) -> dict:
+    return ask(f"Leia a nota {note_id} e gere: resumo executivo, decisões tomadas, action items com responsável e prazo, pontos que precisam de follow-up.", vault=vault)
 
 
-def vault_review(root: Optional[str] = None) -> dict:
+def vault_review(vault: Optional[str] = None) -> dict:
     return ask(
         "Liste todas as notas do vault. Para cada nota que tiver wiki links no formato [[caminho/Nota]] sem alias, "
         "leia a nota e corrija para [[caminho/Nota|Nota]]. Também identifique correlações óbvias entre notas e adicione links onde pertinente. "
         "Reporte quais notas foram modificadas.",
-        root=root,
+        vault=vault,
     )

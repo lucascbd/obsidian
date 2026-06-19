@@ -9,7 +9,7 @@ import logging
 import threading
 from flask import Flask, request, jsonify, render_template_string, Response, stream_with_context
 from flask_cors import CORS
-from agent import ask, weekly_summary, market_insights, summarize_meeting, vault_review, repair_vault, purge_vault, purge_orphan_leaves, ingest_file, ingest_url, ingest_zip, get_root_folders
+from agent import ask, weekly_summary, market_insights, summarize_meeting, vault_review, repair_vault, purge_vault, purge_orphan_leaves, ingest_file, ingest_url, ingest_zip, get_vaults
 
 logging.basicConfig(
     level=logging.INFO,
@@ -191,39 +191,25 @@ HTML = """<!DOCTYPE html>
 
   async function loadRoots() {
     try {
-      var r    = await fetch('/api/roots');
-      var data = await r.json();
-      var roots = data.roots || [];
-
-      // Se ainda vazio, tenta vault-stats para extrair raízes dos IDs
-      if (roots.length === 0) {
-        var r2   = await fetch('/api/vault-stats');
-        var d2   = await r2.json();
-        var ids  = d2.active_note_ids || [];
-        var seen = {};
-        ids.forEach(function(id) {
-          var parts = id.split('/');
-          if (parts.length > 1) seen[parts[0]] = true;
-        });
-        roots = Object.keys(seen).sort();
-      }
+      var r      = await fetch('/api/vaults');
+      var data   = await r.json();
+      var vaults = data.vaults || [];
 
       var sel  = document.getElementById('root-select');
       var filt = document.getElementById('filter-roots');
-      roots.forEach(function(root) {
+      vaults.forEach(function(v) {
         var opt = document.createElement('option');
-        opt.value = root;
-        opt.textContent = '📁 ' + root;
+        opt.value = v;
+        opt.textContent = '🗄️ ' + v;
         sel.appendChild(opt);
 
         var btn = document.createElement('button');
         btn.className = 's-btn';
-        btn.id = 'f-' + root;
-        btn.textContent = '📁 ' + root;
-        btn.onclick = function() { setFilter(root, btn); };
+        btn.textContent = '🗄️ ' + v;
+        btn.onclick = (function(name, b) { return function() { setFilter(name, b); }; })(v, btn);
         filt.appendChild(btn);
       });
-    } catch(e) { console.warn('loadRoots error', e); }
+    } catch(e) { console.warn('loadVaults error', e); }
   }
 
   function setFilter(col, el) {
@@ -327,7 +313,7 @@ HTML = """<!DOCTYPE html>
       appendTyping();
       var form = new FormData();
       form.append('file', snap.file);
-      if (getRoot()) form.append('root', getRoot());
+      if (getRoot()) form.append('vault', getRoot());
       try {
         var r = await fetch('/api/upload', {method:'POST', body:form});
         var d = await r.json();
@@ -345,12 +331,12 @@ HTML = """<!DOCTYPE html>
       var form = new FormData();
       form.append('file', snap.file);
       if (q) form.append('question', q);
-      if (getRoot()) form.append('root', getRoot());
+      if (getRoot()) form.append('vault', getRoot());
       url = '/api/analyze/stream'; init = {method:'POST', body:form};
     } else {
       var body = {question: q};
       if (activeFilter) body.collections = [activeFilter];
-      if (getRoot()) body.root = getRoot();
+      if (getRoot()) body.vault = getRoot();
       url = '/api/ask/stream';
       init = {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)};
     }
@@ -395,7 +381,7 @@ HTML = """<!DOCTYPE html>
     document.getElementById('send-btn').disabled = true;
     var form = new FormData();
     form.append('file', file);
-    if (getRoot()) form.append('root', getRoot());
+    if (getRoot()) form.append('vault', getRoot());
     try {
       var r = await fetch('/api/upload', {method:'POST', body:form});
       var d = await r.json();
@@ -411,7 +397,7 @@ HTML = """<!DOCTYPE html>
     appendTyping();
     document.getElementById('send-btn').disabled = true;
     try {
-      var r = await fetch('/api/upload-url', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url:url, root:getRoot()})});
+      var r = await fetch('/api/upload-url', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url:url, vault:getRoot()})});
       var d = await r.json();
       removeTyping(); appendMsg('agent', d.answer, d.sources);
     } catch(e) { removeTyping(); appendMsg('agent', '❌ Erro ao importar URL.'); }
@@ -424,7 +410,7 @@ HTML = """<!DOCTYPE html>
     appendTyping();
     document.getElementById('send-btn').disabled = true;
     try {
-      var r = await fetch('/api/' + action, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({root:getRoot()})});
+      var r = await fetch('/api/' + action, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({vault:getRoot()})});
       var d = await r.json();
       removeTyping(); appendMsg('agent', d.answer, d.sources);
     } catch(e) { removeTyping(); appendMsg('agent', '❌ Erro ao executar ação.'); }
@@ -452,20 +438,11 @@ def index():
     return render_template_string(HTML)
 
 
-@app.route("/api/roots", methods=["GET"])
-def api_roots():
-    roots = get_root_folders()
-    # Fallback: usa coleções do ChromaDB se CouchDB retornar vazio
-    if not roots:
-        try:
-            import chromadb as _chroma
-            from agent import CHROMA_HOST, CHROMA_PORT
-            client = _chroma.HttpClient(host=CHROMA_HOST, port=CHROMA_PORT)
-            roots = sorted(c.name for c in client.list_collections())
-        except Exception:
-            pass
-    log.info(f"api_roots: {roots}")
-    return jsonify({"roots": roots})
+@app.route("/api/vaults", methods=["GET"])
+def api_vaults():
+    vaults = get_vaults()
+    log.info(f"api_vaults: {vaults}")
+    return jsonify({"vaults": vaults})
 
 
 @app.route("/api/vault-stats", methods=["GET"])
@@ -509,10 +486,10 @@ def api_ask():
     data        = request.get_json()
     question    = data.get("question", "").strip()
     collections = data.get("collections")
-    root        = data.get("root") or None
+    vault       = data.get("vault") or None
     if not question:
         return jsonify({"error": "question obrigatório"}), 400
-    result = ask(question, collections, root=root)
+    result = ask(question, collections, vault=vault)
     return jsonify(result)
 
 
@@ -522,7 +499,7 @@ def api_ask_stream():
     data        = request.get_json()
     question    = (data or {}).get("question", "").strip()
     collections = (data or {}).get("collections")
-    root        = (data or {}).get("root") or None
+    vault       = (data or {}).get("vault") or None
 
     if not question:
         def _err():
@@ -555,7 +532,7 @@ def api_ask_stream():
         elif tool == "read_note":
             detail = args.get("note_id", "")
         elif tool == "ensure_settings":
-            detail = f"root={args.get('root', '')}"
+            detail = f"vault={args.get('vault', '')}"
         else:
             detail = preview[:120] if preview else ""
 
@@ -563,7 +540,7 @@ def api_ask_stream():
 
     def _run_agent():
         try:
-            result = ask(question, collections, root=root, on_progress=_on_progress)
+            result = ask(question, collections, vault=vault, on_progress=_on_progress)
             q.put({"type": "done", "answer": result.get("answer", ""), "sources": result.get("sources", [])})
         except Exception as e:
             q.put({"type": "error", "message": str(e)})
@@ -611,7 +588,7 @@ def api_analyze_stream():
 
     f        = request.files["file"]
     question = request.form.get("question", "").strip()
-    root     = request.form.get("root") or None
+    vault    = request.form.get("vault") or None
     content  = f.read()
 
     try:
@@ -652,7 +629,7 @@ def api_analyze_stream():
 
     def _run():
         try:
-            result = agent_ask(instruction, root=root, on_progress=_on_progress)
+            result = agent_ask(instruction, vault=vault, on_progress=_on_progress)
             q.put({"type": "done", "answer": result.get("answer", ""), "sources": result.get("sources", [])})
         except Exception as e:
             q.put({"type": "error", "message": str(e)})
@@ -686,19 +663,19 @@ def api_analyze_stream():
 @app.route("/api/weekly", methods=["POST"])
 def api_weekly():
     data = request.get_json(silent=True) or {}
-    return jsonify(weekly_summary(root=data.get("root") or None))
+    return jsonify(weekly_summary(vault=data.get("vault") or None))
 
 
 @app.route("/api/insights", methods=["POST"])
 def api_insights():
     data = request.get_json(silent=True) or {}
-    return jsonify(market_insights(root=data.get("root") or None))
+    return jsonify(market_insights(vault=data.get("vault") or None))
 
 
 @app.route("/api/vault-review", methods=["POST"])
 def api_vault_review():
     data = request.get_json(silent=True) or {}
-    return jsonify(vault_review(root=data.get("root") or None))
+    return jsonify(vault_review(vault=data.get("vault") or None))
 
 
 @app.route("/api/repair", methods=["POST"])
@@ -722,34 +699,34 @@ def api_purge_leaves():
 def api_meeting():
     data    = request.get_json()
     note_id = data.get("note_id", "").strip()
-    root    = data.get("root") or None
+    vault   = data.get("vault") or None
     if not note_id:
         return jsonify({"error": "note_id obrigatório"}), 400
-    return jsonify(summarize_meeting(note_id, root=root))
+    return jsonify(summarize_meeting(note_id, vault=vault))
 
 
 @app.route("/api/upload", methods=["POST"])
 def api_upload():
     if "file" not in request.files:
         return jsonify({"error": "arquivo obrigatório"}), 400
-    f    = request.files["file"]
-    root = request.form.get("root") or None
+    f     = request.files["file"]
+    vault = request.form.get("vault") or None
     content = f.read()
     if not content:
         return jsonify({"error": "arquivo vazio"}), 400
     if f.filename.lower().endswith(".zip"):
-        return jsonify(ingest_zip(content, root=root))
-    return jsonify(ingest_file(f.filename, content, root=root))
+        return jsonify(ingest_zip(content, vault=vault))
+    return jsonify(ingest_file(f.filename, content, vault=vault))
 
 
 @app.route("/api/upload-url", methods=["POST"])
 def api_upload_url():
     data = request.get_json()
-    url  = (data or {}).get("url", "").strip()
-    root = (data or {}).get("root") or None
+    url   = (data or {}).get("url", "").strip()
+    vault = (data or {}).get("vault") or None
     if not url:
         return jsonify({"error": "url obrigatória"}), 400
-    result = ingest_url(url, root=root)
+    result = ingest_url(url, vault=vault)
     return jsonify(result)
 
 
