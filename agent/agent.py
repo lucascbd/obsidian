@@ -1302,6 +1302,46 @@ def _normalize_tag(tag: str) -> str:
     return tag
 
 
+def _fix_codeblock_frontmatter(content: str) -> str:
+    """Converte ```yaml\\n...\\n``` no início da nota para frontmatter --- correto."""
+    m = re.match(r"^```(?:yaml)?\n(.*?)\n```\s*\n?", content, re.DOTALL)
+    if m:
+        yaml_body = m.group(1)
+        rest = content[m.end():]
+        return f"---\n{yaml_body}\n---\n{rest.lstrip()}"
+    return content
+
+
+def _fix_tags_in_frontmatter(fm_body: str) -> str:
+    """Normaliza o bloco de tags dentro do frontmatter (lista YAML ou array inline)."""
+    def _replace(m):
+        block = m.group(0)
+
+        # Array inline: tags: ["crítica pessoal", "Saúde"] ou tags: [tag1, tag2]
+        inline = re.match(r'^tags:\s*\[(.+)\]\s*$', block.strip(), re.DOTALL)
+        if inline:
+            raw_tags = re.findall(r'"([^"]+)"|\'([^\']+)\'|([^,\[\]\s]+)', inline.group(1))
+            tags = [_normalize_tag(next(p for p in t if p)) for t in raw_tags]
+            tags = [t for t in tags if t]
+            return "tags:\n" + "\n".join(f"  - {t}" for t in tags)
+
+        # Lista YAML: tags:\n  - valor
+        lines = block.split("\n")
+        out = []
+        for line in lines:
+            item = re.match(r"^(\s*[-*]\s*)(.+)$", line)
+            if item:
+                raw = item.group(2).strip().strip("\"'")
+                norm = _normalize_tag(raw)
+                if norm:
+                    out.append(f"{item.group(1)}{norm}")
+            else:
+                out.append(line)
+        return "\n".join(out)
+
+    return re.sub(r"^tags:.*?(?=\n\w|\Z)", _replace, fm_body, flags=re.MULTILINE | re.DOTALL)
+
+
 def normalize_tags(vault: Optional[str] = None) -> dict:
     """Lê todas as notas do vault, normaliza tags no frontmatter (sem LLM).
     Se vault=None, processa todos os vaults disponíveis."""
@@ -1337,30 +1377,21 @@ def normalize_tags(vault: Optional[str] = None) -> dict:
                 all_errors.append(f"[{_db}] {nid}: {e}")
                 continue
 
-            if not content or "tags:" not in content:
+            if not content:
                 continue
 
-            def _fix_tags_block(m):
-                block = m.group(0)
-                lines = block.split("\n")
-                new_lines = []
-                for line in lines:
-                    item = re.match(r"^(\s*[-*]\s*)(.+)$", line)
-                    if item:
-                        prefix, raw_tag = item.group(1), item.group(2).strip().strip("\"'")
-                        normalized = _normalize_tag(raw_tag)
-                        if normalized:
-                            new_lines.append(f"{prefix}{normalized}")
-                    else:
-                        new_lines.append(line)
-                return "\n".join(new_lines)
+            # 1. Converte ```yaml ... ``` para frontmatter --- correto
+            new_content = _fix_codeblock_frontmatter(content)
 
-            new_content = re.sub(
-                r"^tags:.*?(?=\n\S|\Z)",
-                _fix_tags_block,
-                content,
-                flags=re.MULTILINE | re.DOTALL,
-            )
+            # 2. Normaliza tags dentro do frontmatter ---
+            if new_content.startswith("---"):
+                end = new_content.find("\n---", 3)
+                if end != -1 and "tags:" in new_content[:end]:
+                    fm_body    = new_content[3:end]
+                    fixed_fm   = _fix_tags_in_frontmatter(fm_body)
+                    new_content = f"---{fixed_fm}\n---{new_content[end + 4:]}"
+            elif "tags:" not in new_content:
+                continue  # sem tags, pula
 
             if new_content == content:
                 continue
