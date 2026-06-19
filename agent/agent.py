@@ -540,27 +540,20 @@ def _extract_text_from_url(url: str) -> str:
 
 INGEST_PROMPT = """Você é o Mordomo do Conhecimento. Converta o conteúdo abaixo em uma nota Obsidian bem estruturada.
 
-INSTRUÇÕES:
-1. Analise o conteúdo e decida a pasta/subpasta mais semântica para ele.
-   - Use hierarquias temáticas livres. Exemplos:
-     - Um artigo sobre IA → "tecnologia/inteligencia-artificial/artigo-nome.md"
-     - Uma ata de reunião → "reunioes/2024/cliente-x-kick-off.md"
-     - Perfil de empresa  → "empresas/nome-empresa/perfil.md"
-     - Relatório de mercado → "mercado/latam/nome-relatorio.md"
-   - Seja específico. Prefira "projetos/saas-b2b/roadmap-q1.md" a "projetos/nota.md"
-2. Crie slug lowercase com hifens, sem acentos.
-3. Escreva a nota em markdown com:
-   - Frontmatter YAML: title, date (hoje: {today}), source (se URL/arquivo), tags (3-5 relevantes)
-   - Seções organizadas com # ## ###
-   - Linguagem concisa em português
-   - Wiki links para notas do vault que sejam relacionadas: [[caminho/nota|Nome]]
-4. Se o conteúdo mencionar pessoas, empresas, projetos que não têm nota no vault, crie entradas no campo "related_notes_to_create" para que o agente crie depois.
+{load_rules_section}
+
+REGRAS GERAIS (aplicar somente se não houver REGRAS DO VAULT acima):
+- Estrutura: sempre 3 níveis de hierarquia (ex: categoria/tema/nome.md)
+- Slug em lowercase com hifens, sem acentos
+- Frontmatter obrigatório: title, date ({today}), source, tags (3-5)
+- Seções com ## e ###, conteúdo em português, conciso e navegável
+- Wiki links com alias: [[caminho/nota|Nome Visível]]
 
 NOTAS EXISTENTES NO VAULT:
 {note_ids}
 
-Responda APENAS com um JSON no formato:
-{{"path": "pasta/subpasta/nome.md", "content": "conteúdo completo da nota", "summary": "1-2 frases descrevendo o que foi criado"}}"""
+Responda APENAS com um JSON válido (sem texto antes ou depois):
+{{"path": "nivel1/nivel2/nivel3/nome.md", "content": "conteúdo completo da nota em markdown", "summary": "1-2 frases descrevendo o que foi criado"}}"""
 
 
 def ingest(raw_text: str, source_name: str, vault: Optional[str] = None, db: str = None) -> dict:
@@ -570,19 +563,23 @@ def ingest(raw_text: str, source_name: str, vault: Optional[str] = None, db: str
     note_ids = tool_list_notes(db=db)
     today = datetime.date.today().isoformat()
 
-    vault_instruction = (
-        f"\nESCOPO: Você está trabalhando no vault '{vault}'. "
-        f"As notas de configuração estão em '00-meta/config/'."
-    ) if vault else ""
-
-    # Carrega regras de ingestão do vault se vault fornecido
-    load_rules = ""
+    # Carrega regras do vault — têm prioridade sobre as regras gerais
+    load_rules_section = ""
     if vault:
         settings = load_settings(vault, db=db)
         if settings.get("load"):
-            load_rules = f"\n\nREGRAS DE INGESTÃO DO VAULT:\n{settings['load']}"
+            load_rules_section = (
+                f"⚠️ REGRAS DO VAULT (PRIORIDADE MÁXIMA — seguir à risca, ignorar qualquer exemplo genérico abaixo):\n"
+                f"{settings['load']}"
+            )
 
-    prompt = (INGEST_PROMPT + vault_instruction + load_rules).replace("{note_ids}", note_ids[:3000]).replace("{today}", today)
+    vault_ctx = f"\nVAULT: {vault}" if vault else ""
+    prompt = (
+        INGEST_PROMPT
+        .replace("{load_rules_section}", load_rules_section)
+        .replace("{note_ids}", note_ids[:3000])
+        .replace("{today}", today)
+    ) + vault_ctx
     user_msg = f"FONTE: {source_name}\n\nCONTEÚDO:\n{raw_text[:8000]}"
 
     messages = [
