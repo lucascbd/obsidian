@@ -1304,85 +1304,86 @@ def _normalize_tag(tag: str) -> str:
 
 def normalize_tags(vault: Optional[str] = None) -> dict:
     """Lê todas as notas do vault, normaliza tags no frontmatter (sem LLM).
-    Regras: lowercase, sem acentos, espaços → hífens."""
-    db = vault or COUCHDB_DB
-    _db = db
+    Se vault=None, processa todos os vaults disponíveis."""
+    vaults = [vault] if vault else get_vaults()
+    if not vaults:
+        return {"answer": "Nenhum vault encontrado no CouchDB.", "sources": []}
 
-    r = requests.get(
-        f"{COUCHDB_URL}/{_db}/_all_docs",
-        params={"include_docs": True},
-        auth=COUCHDB_AUTH, timeout=30,
-    )
-    r.raise_for_status()
-    rows = r.json().get("rows", [])
+    all_updated, all_errors = [], []
 
-    updated, skipped, errors = [], [], []
-
-    for row in rows:
-        doc = row.get("doc", {})
-        nid = row["id"]
-        if (nid.startswith("_") or nid.startswith("h:")
-                or doc.get("deleted") or _is_settings_note(nid)):
-            continue
-
+    for _db in vaults:
         try:
-            content = _read_note_content(doc, db=_db)
+            r = requests.get(
+                f"{COUCHDB_URL}/{_db}/_all_docs",
+                params={"include_docs": True},
+                auth=COUCHDB_AUTH, timeout=30,
+            )
+            r.raise_for_status()
         except Exception as e:
-            errors.append(f"{nid}: {e}")
+            all_errors.append(f"[{_db}] erro ao listar: {e}")
             continue
 
-        if not content or "tags:" not in content:
-            skipped.append(nid)
-            continue
+        rows = r.json().get("rows", [])
+        for row in rows:
+            doc = row.get("doc", {})
+            nid = row["id"]
+            if (nid.startswith("_") or nid.startswith("h:")
+                    or doc.get("deleted") or _is_settings_note(nid)):
+                continue
 
-        # Extrai e normaliza tags do frontmatter
-        def _fix_tags_block(m):
-            block = m.group(0)
-            lines = block.split("\n")
-            new_lines = []
-            for line in lines:
-                # linha de item de tag: "  - Valor Com Espaço"
-                item = re.match(r"^(\s*[-*]\s*)(.+)$", line)
-                if item:
-                    prefix, raw_tag = item.group(1), item.group(2).strip().strip("\"'")
-                    normalized = _normalize_tag(raw_tag)
-                    if normalized:
-                        new_lines.append(f"{prefix}{normalized}")
-                    # descarta tags que viraram vazias
+            try:
+                content = _read_note_content(doc, db=_db)
+            except Exception as e:
+                all_errors.append(f"[{_db}] {nid}: {e}")
+                continue
+
+            if not content or "tags:" not in content:
+                continue
+
+            def _fix_tags_block(m):
+                block = m.group(0)
+                lines = block.split("\n")
+                new_lines = []
+                for line in lines:
+                    item = re.match(r"^(\s*[-*]\s*)(.+)$", line)
+                    if item:
+                        prefix, raw_tag = item.group(1), item.group(2).strip().strip("\"'")
+                        normalized = _normalize_tag(raw_tag)
+                        if normalized:
+                            new_lines.append(f"{prefix}{normalized}")
+                    else:
+                        new_lines.append(line)
+                return "\n".join(new_lines)
+
+            new_content = re.sub(
+                r"^tags:.*?(?=\n\S|\Z)",
+                _fix_tags_block,
+                content,
+                flags=re.MULTILINE | re.DOTALL,
+            )
+
+            if new_content == content:
+                continue
+
+            try:
+                ok = _write_note_content(doc, new_content, db=_db)
+                if ok:
+                    all_updated.append(f"{_db}/{nid}")
+                    log.info(f"normalize_tags: [{_db}] {nid}")
                 else:
-                    new_lines.append(line)
-            return "\n".join(new_lines)
+                    all_errors.append(f"[{_db}] {nid}: falha ao salvar")
+            except Exception as e:
+                all_errors.append(f"[{_db}] {nid}: {e}")
 
-        new_content = re.sub(
-            r"^tags:.*?(?=\n\S|\Z)",
-            _fix_tags_block,
-            content,
-            flags=re.MULTILINE | re.DOTALL,
-        )
-
-        if new_content == content:
-            skipped.append(nid)
-            continue
-
-        try:
-            ok = _write_note_content(doc, new_content, db=_db)
-            if ok:
-                updated.append(nid)
-                log.info(f"normalize_tags: {nid}")
-            else:
-                errors.append(f"{nid}: falha ao salvar")
-        except Exception as e:
-            errors.append(f"{nid}: {e}")
-
-    lines = [f"**{len(updated)} nota(s) atualizadas**, {len(skipped)} sem mudança, {len(errors)} erro(s)."]
-    if updated:
+    lines = [f"**{len(all_updated)} nota(s) atualizadas**, {len(all_errors)} erro(s)."]
+    if all_updated:
         lines.append("\n**Atualizadas:**")
-        lines.extend(f"- `{n}`" for n in updated)
-    if errors:
+        lines.extend(f"- `{n}`" for n in all_updated)
+    if all_errors:
         lines.append("\n**Erros:**")
-        lines.extend(f"- {e}" for e in errors)
+        lines.extend(f"- {e}" for e in all_errors)
 
-    return {"answer": "\n".join(lines), "sources": updated}
+    return {"answer": "\n".join(lines), "sources": all_updated}
 
 
 # ── Ações rápidas ────────────────────────────────────────────────────────────
