@@ -156,7 +156,7 @@ def update_link_graph(vault: str, note_id: str, links: list[str], deleted: bool 
 
 # ── Indexação ─────────────────────────────────────────────────────────────────
 
-def index_note(doc: dict, vault: str, chroma: chromadb.HttpClient, model: TextEmbedding):
+def index_note(doc: dict, vault: str, col, model: TextEmbedding):
     note_id = doc.get("_id", "")
 
     # Filtra internos, leaves, settings, deletados
@@ -168,13 +168,12 @@ def index_note(doc: dict, vault: str, chroma: chromadb.HttpClient, model: TextEm
     if not content or not content.strip():
         return
 
-    col      = chroma.get_or_create_collection(_col_name(vault))
-    fm       = parse_frontmatter(content)
-    links    = extract_wiki_links(content)
+    fm    = parse_frontmatter(content)
+    links = extract_wiki_links(content)
 
     update_link_graph(vault, note_id, links)
 
-    # Remove chunks antigos desta nota
+    # Remove chunks antigos desta nota (upsert)
     try:
         col.delete(where={"note_id": note_id})
     except Exception:
@@ -201,7 +200,7 @@ def delete_note_from_index(note_id: str, vault: str, chroma: chromadb.HttpClient
     if not note_id or note_id.startswith("_") or note_id.startswith("h:"):
         return
     try:
-        chroma.get_collection(_col_name(vault)).delete(where={"note_id": note_id})
+        chroma.get_or_create_collection(_col_name(vault)).delete(where={"note_id": note_id})
         log.info(f"[{vault}] Removido {note_id}")
     except Exception:
         pass
@@ -219,6 +218,9 @@ def full_reindex(vault: str, chroma: chromadb.HttpClient, model: TextEmbedding):
         log.info(f"[{vault}] Coleção anterior removida")
     except Exception:
         pass
+
+    # Cria coleção fresca uma única vez
+    col = chroma.get_or_create_collection(_col_name(vault))
 
     # Reseta grafo de links
     _write_link_graph(vault, {"_id": LINK_GRAPH_DOC, "links": {}})
@@ -238,7 +240,7 @@ def full_reindex(vault: str, chroma: chromadb.HttpClient, model: TextEmbedding):
         if not rows:
             break
         for row in rows:
-            index_note(row.get("doc", {}), vault, chroma, model)
+            index_note(row.get("doc", {}), vault, col, model)
             total += 1
         skip += limit
     log.info(f"[{vault}] Reindexação: {total} docs processados")
@@ -246,6 +248,7 @@ def full_reindex(vault: str, chroma: chromadb.HttpClient, model: TextEmbedding):
 
 def watch_vault(vault: str, chroma: chromadb.HttpClient, model: TextEmbedding):
     log.info(f"[{vault}] Watch iniciado")
+    col      = chroma.get_or_create_collection(_col_name(vault))
     last_seq = "0"
     while True:
         try:
@@ -265,7 +268,7 @@ def watch_vault(vault: str, chroma: chromadb.HttpClient, model: TextEmbedding):
                 if change.get("deleted"):
                     delete_note_from_index(doc.get("_id", ""), vault, chroma)
                 else:
-                    index_note(doc, vault, chroma, model)
+                    index_note(doc, vault, col, model)
             last_seq = data.get("last_seq", last_seq)
         except requests.exceptions.Timeout:
             pass  # normal no longpoll
