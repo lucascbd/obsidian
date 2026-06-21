@@ -9,7 +9,7 @@ import logging
 import threading
 from flask import Flask, request, jsonify, render_template_string, Response, stream_with_context
 from flask_cors import CORS
-from agent import ask, weekly_summary, summarize_meeting, vault_review, normalize_tags, repair_vault, purge_vault, purge_orphan_leaves, ingest_file, ingest_url, ingest_zip, get_vaults, stop_agent, reset_stop
+from agent import ask, weekly_summary, summarize_meeting, vault_review, normalize_tags, repair_vault, purge_vault, purge_orphan_leaves, ingest_file, ingest_url, ingest_zip, get_vaults, stop_agent, reset_stop, tool_read_note, COUCHDB_URL, COUCHDB_DB, COUCHDB_AUTH
 
 logging.basicConfig(
     level=logging.INFO,
@@ -94,6 +94,14 @@ HTML = """<!DOCTYPE html>
   .btn-stop:hover{opacity:.85}
   .drop-overlay{position:fixed;inset:0;background:rgba(79,127,255,.15);border:2px dashed var(--accent);z-index:999;display:none;align-items:center;justify-content:center;font-size:20px;color:var(--accent);pointer-events:none}
   .drop-overlay.active{display:flex}
+  .ft-tree{padding:2px 0}
+  details.ft-folder{list-style:none}
+  details.ft-folder>summary{cursor:pointer;color:var(--label);font-size:12px;padding:3px 8px 3px 4px;display:flex;align-items:center;gap:5px;border-radius:5px;list-style:none;user-select:none}
+  details.ft-folder>summary:hover{background:var(--surface2)}
+  details.ft-folder>summary::marker{display:none}
+  .ft-children{padding-left:10px;border-left:1px solid var(--border);margin-left:8px}
+  .ft-file{cursor:pointer;color:var(--muted);font-size:11px;padding:2px 8px;display:flex;align-items:center;gap:5px;border-radius:5px;font-family:'JetBrains Mono',monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .ft-file:hover{background:var(--surface2);color:var(--label)}
 </style>
 </head>
 <body>
@@ -127,6 +135,8 @@ HTML = """<!DOCTYPE html>
     <div class="s-label">Filtrar busca</div>
     <button class="s-btn active" id="f-all" onclick="setFilter(null,this)">🗂 Tudo</button>
     <div id="filter-roots"></div>
+    <div class="s-label">Explorador</div>
+    <div id="file-tree" class="ft-tree"><span style="color:var(--muted);font-size:11px;padding:4px 8px;display:block">Selecione um vault</span></div>
   </aside>
 
   <div class="main">
@@ -190,8 +200,68 @@ HTML = """<!DOCTYPE html>
   // ── Roots ───────────────────────────────────────────────────────────────────
   function onRootChange() {
     activeRoot = document.getElementById('root-select').value || null;
+    loadFileTree(activeRoot);
   }
   function getRoot() { return activeRoot; }
+
+  // ── File explorer ────────────────────────────────────────────────────────────
+  function renderTree(items, container) {
+    items.forEach(function(item) {
+      if (item.type === 'folder') {
+        var det = document.createElement('details');
+        det.className = 'ft-folder';
+        var sum = document.createElement('summary');
+        sum.innerHTML = '📁 ' + item.name;
+        det.appendChild(sum);
+        var ch = document.createElement('div');
+        ch.className = 'ft-children';
+        renderTree(item.children || [], ch);
+        det.appendChild(ch);
+        container.appendChild(det);
+      } else {
+        var div = document.createElement('div');
+        div.className = 'ft-file';
+        div.title = item.id;
+        div.innerHTML = '📄 ' + item.name;
+        div.onclick = (function(id) { return function() { openNote(id); }; })(item.id);
+        container.appendChild(div);
+      }
+    });
+  }
+
+  async function loadFileTree(vault) {
+    var treeDiv = document.getElementById('file-tree');
+    if (!treeDiv) return;
+    if (!vault) { treeDiv.innerHTML = '<span style="color:var(--muted);font-size:11px;padding:4px 8px;display:block">Selecione um vault</span>'; return; }
+    treeDiv.innerHTML = '<span style="color:var(--muted);font-size:11px;padding:4px 8px;display:block">Carregando...</span>';
+    try {
+      var r = await fetch('/api/notes/tree?vault=' + encodeURIComponent(vault));
+      var d = await r.json();
+      treeDiv.innerHTML = '';
+      if (d.error || !d.tree || d.tree.length === 0) {
+        treeDiv.innerHTML = '<span style="color:var(--muted);font-size:11px;padding:4px 8px;display:block">Sem notas</span>';
+        return;
+      }
+      renderTree(d.tree, treeDiv);
+    } catch(e) {
+      treeDiv.innerHTML = '<span style="color:var(--muted);font-size:11px;padding:4px 8px;display:block">Erro ao carregar</span>';
+    }
+  }
+
+  async function openNote(noteId) {
+    appendMsg('user', '📄 ' + noteId);
+    appendTyping();
+    setBusy(true);
+    try {
+      var vault = getRoot();
+      var url = '/api/note/read?note_id=' + encodeURIComponent(noteId) + (vault ? '&vault=' + encodeURIComponent(vault) : '');
+      var r = await fetch(url);
+      var d = await r.json();
+      removeTyping();
+      appendMsg('agent', d.content || d.error || '(nota vazia)', [noteId]);
+    } catch(e) { removeTyping(); appendMsg('agent', '❌ Erro ao abrir nota.'); }
+    setBusy(false);
+  }
 
   async function loadRoots() {
     try {
@@ -782,6 +852,60 @@ def api_upload_url():
         return jsonify({"error": "url obrigatória"}), 400
     result = ingest_url(url, vault=vault)
     return jsonify(result)
+
+
+@app.route("/api/notes/tree")
+def api_notes_tree():
+    """Retorna a árvore de arquivos do vault como JSON."""
+    import requests as _req
+    vault = request.args.get("vault") or None
+    _db = vault or COUCHDB_DB
+    try:
+        r = _req.get(
+            f"{COUCHDB_URL}/{_db}/_all_docs",
+            params={"include_docs": True},
+            auth=COUCHDB_AUTH, timeout=30,
+        )
+        r.raise_for_status()
+        note_ids = [
+            row["id"] for row in r.json().get("rows", [])
+            if not row["id"].startswith("_")
+            and not row["id"].startswith("h:")
+            and not row.get("doc", {}).get("deleted")
+        ]
+
+        def _build(node, path=""):
+            items = []
+            for name, children in sorted(node.items()):
+                full = (path + "/" + name).lstrip("/")
+                if children is None:
+                    items.append({"name": name, "type": "file", "id": full})
+                else:
+                    items.append({"name": name, "type": "folder", "children": _build(children, full)})
+            return items
+
+        tree: dict = {}
+        for nid in note_ids:
+            parts = nid.split("/")
+            node = tree
+            for part in parts[:-1]:
+                node = node.setdefault(part, {})
+            node[parts[-1]] = None
+
+        return jsonify({"tree": _build(tree)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/note/read")
+def api_note_read():
+    """Lê o conteúdo de uma nota pelo seu ID."""
+    note_id = request.args.get("note_id", "").strip()
+    vault   = request.args.get("vault") or None
+    if not note_id:
+        return jsonify({"error": "note_id obrigatório"}), 400
+    content = tool_read_note(note_id, db=vault)
+    return jsonify({"note_id": note_id, "content": content})
 
 
 @app.route("/health")

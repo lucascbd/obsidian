@@ -636,6 +636,45 @@ Responda APENAS com um JSON válido (sem texto antes ou depois):
 {{"path": "nivel1/nivel2/nivel3/nome.md", "content": "conteúdo completo da nota em markdown", "summary": "1-2 frases descrevendo o que foi criado"}}"""
 
 
+def _find_related_for_new_note(content: str, exclude_path: str, db: str = None, threshold: float = 0.72) -> list:
+    """Busca notas semanticamente relacionadas para auto-linking no ingest."""
+    vault = db or COUCHDB_DB
+    try:
+        col = get_chroma().get_collection(_col_name(vault))
+        embedding = list(get_embed_model().embed([content[:1000]]))[0].tolist()
+        r = col.query(query_embeddings=[embedding], n_results=10, include=["metadatas", "distances"])
+        related, seen = [], {exclude_path.lower()}
+        for meta, dist in zip(r["metadatas"][0], r["distances"][0]):
+            nid = meta.get("note_id", "")
+            score = round(1 - dist, 3)
+            if nid and nid not in seen and score >= threshold and not _is_settings_note(nid):
+                related.append({"note_id": nid, "title": meta.get("title") or nid.split("/")[-1].replace(".md", ""), "score": score})
+                seen.add(nid)
+        return related[:5]
+    except Exception:
+        return []
+
+
+def _graph_enrich_search(args: dict, db: str = None) -> str:
+    """Chama tool_search_vault e enriquece cada resultado com notas conectadas no grafo."""
+    raw = tool_search_vault(db=db, **args)
+    try:
+        results = json.loads(raw)
+        graph = _get_link_graph(db=db)
+        for item in results:
+            nid = item.get("note_id", "")
+            if not nid:
+                continue
+            out = graph.get(nid, [])
+            inc = [k for k, v in graph.items() if nid in v]
+            connected = list(dict.fromkeys(out + inc))[:6]
+            if connected:
+                item["connected_notes"] = connected
+        return json.dumps(results, ensure_ascii=False)
+    except Exception:
+        return raw
+
+
 def ingest(raw_text: str, source_name: str, vault: Optional[str] = None, db: str = None) -> dict:
     """Converte texto bruto em nota Obsidian e salva no vault."""
     import datetime
@@ -687,6 +726,15 @@ def ingest(raw_text: str, source_name: str, vault: Optional[str] = None, db: str
         path    = data.get("path", "00-inbox/imported.md")
         content = data.get("content", raw_text[:4000])
         summary = data.get("summary", f"Nota criada a partir de {source_name}")
+
+        # Auto-link: busca notas relacionadas e adiciona seção antes de salvar
+        related = _find_related_for_new_note(content, path, db=db)
+        if related and "## Notas Relacionadas" not in content:
+            links = "\n".join(
+                f"- [[{r['note_id']}|{r['title']}]]  (similaridade: {r['score']})"
+                for r in related
+            )
+            content += f"\n\n## Notas Relacionadas\n{links}"
 
         result = tool_create_note(path, content, db=db)
         log.info(f"Ingest: {result}")
@@ -1137,7 +1185,7 @@ def ask(question: str, collections: Optional[list] = None, vault: Optional[str] 
 
     # Ferramentas com db vinculado ao vault escolhido
     scoped_fns = {
-        "search_vault":    lambda args: tool_search_vault(db=db, **args),
+        "search_vault":    lambda args: _graph_enrich_search(args, db=db),
         "get_neighbors":   lambda args: tool_get_neighbors(db=db, **args),
         "graph_search":    lambda args: tool_graph_search(db=db, **args),
         "read_note":       lambda args: tool_read_note(db=db, **args),
