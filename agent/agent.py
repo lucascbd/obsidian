@@ -491,10 +491,114 @@ def reindex_vault(vault: Optional[str] = None) -> dict:
         log.info(msg)
         results.append(msg)
 
+        # Gera índices Obsidian em 00-meta/indices/
+        try:
+            _build_vault_indices(v, col)
+            results.append(f"[{v}] índices Obsidian gerados em 00-meta/indices/")
+        except Exception as e:
+            log.warning(f"[reindex] Erro ao gerar índices: {e}")
+
     return {
         "answer": "✅ Reindexação concluída:\n" + "\n".join(f"- {r}" for r in results),
         "sources": [],
     }
+
+
+def _build_vault_indices(vault: str, col) -> None:
+    """Gera notas de índice (MOC) em 00-meta/indices/ a partir dos metadados no ChromaDB.
+    Um índice por pasta raiz + mapa geral. Zero LLM."""
+    import datetime
+    today = datetime.date.today().isoformat()
+
+    # Coleta todos os IDs únicos e seus metadados do ChromaDB
+    all_meta = col.get(include=["metadatas"])
+    seen_notes: dict[str, dict] = {}
+    for meta in all_meta.get("metadatas", []):
+        nid = meta.get("note_id", "")
+        if not nid or _is_settings_note(nid):
+            continue
+        if nid not in seen_notes:
+            seen_notes[nid] = {
+                "title": meta.get("title") or nid.split("/")[-1].replace(".md", "").replace("-", " ").title(),
+                "tags":  meta.get("tags", ""),
+                "date":  meta.get("date", ""),
+            }
+
+    # Agrupa por pasta raiz → subpasta
+    from collections import defaultdict
+    tree: dict[str, dict[str, list]] = defaultdict(lambda: defaultdict(list))
+    for nid, meta in sorted(seen_notes.items()):
+        parts = nid.split("/")
+        root  = parts[0]
+        sub   = parts[1] if len(parts) > 2 else ""
+        tree[root][sub].append((nid, meta))
+
+    # Gera um índice por pasta raiz
+    index_paths = []
+    for root, subs in sorted(tree.items()):
+        total = sum(len(notes) for notes in subs.values())
+        lines = [
+            f"---",
+            f"title: Índice — {root}",
+            f"date: {today}",
+            f"tags:",
+            f"  - indice",
+            f"  - auto-gerado",
+            f"---",
+            f"",
+            f"# Índice: {root}",
+            f"",
+            f"> {total} nota(s) · gerado automaticamente",
+            f"",
+        ]
+        for sub, notes in sorted(subs.items()):
+            if sub:
+                lines.append(f"## {sub}")
+                lines.append("")
+            for nid, meta in sorted(notes, key=lambda x: x[0]):
+                title = meta["title"]
+                lines.append(f"- [[{nid}|{title}]]")
+            lines.append("")
+
+        content    = "\n".join(lines)
+        index_path = f"00-meta/indices/{root}.md"
+        tool_create_note(index_path, content, db=vault)
+        index_paths.append(index_path)
+        log.info(f"[indices] {index_path} — {total} notas")
+
+    # Gera mapa geral
+    map_lines = [
+        f"---",
+        f"title: Mapa Geral do Vault",
+        f"date: {today}",
+        f"tags:",
+        f"  - indice",
+        f"  - mapa",
+        f"  - auto-gerado",
+        f"---",
+        f"",
+        f"# Mapa Geral — {vault}",
+        f"",
+        f"> {len(seen_notes)} nota(s) total · gerado automaticamente em {today}",
+        f"",
+    ]
+    for root, subs in sorted(tree.items()):
+        total = sum(len(n) for n in subs.values())
+        map_lines.append(f"## [[00-meta/indices/{root}.md|{root}]] ({total})")
+        for sub, notes in sorted(subs.items()):
+            if sub:
+                map_lines.append(f"### {sub} ({len(notes)})")
+            for nid, meta in sorted(notes, key=lambda x: x[0])[:5]:
+                map_lines.append(f"- [[{nid}|{meta['title']}]]")
+            if len(notes) > 5:
+                map_lines.append(f"- _(+{len(notes)-5} mais — ver [[00-meta/indices/{root}.md|índice completo]])_")
+        map_lines.append("")
+
+    tool_create_note("00-meta/indices/_mapa-geral.md", "\n".join(map_lines), db=vault)
+    log.info(f"[indices] _mapa-geral.md gerado com {len(seen_notes)} notas e {len(index_paths)} índices")
+
+
+def _is_settings_note(note_id: str) -> bool:
     """Retorna True se a nota pertence à pasta 00-meta ou é doc interno do LiveSync."""
     if note_id in _INTERNAL_DOCS:
         return True
