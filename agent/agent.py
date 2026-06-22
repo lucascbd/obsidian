@@ -1102,10 +1102,28 @@ FORMATO OBRIGATÓRIO — SEM EXCEÇÃO:
 {"tool": "ensure_settings", "args": {"vault": "nome-do-vault"}}
 {"tool": "done", "args": {"answer": "resumo completo do que foi feito"}}
 
+USO EFICIENTE DAS FERRAMENTAS — OBRIGATÓRIO:
+
+❌ NUNCA faça list_notes + read_note em loop para analisar o vault. Isso é O(n) e lento.
+✅ USE search_vault com queries temáticas para descobrir clusters de conteúdo.
+
+QUANDO ANALISAR ESTRUTURA, CORRELAÇÕES OU ORGANIZAÇÃO:
+1. Faça várias chamadas search_vault com queries temáticas (ex: "reunião projeto", "análise mercado", "empresa parceiro", "decisão estratégica", etc.)
+2. Use graph_search nas notas mais conectadas para mapear clusters
+3. Use list_notes APENAS para obter a lista de caminhos/pastas existentes — nunca para ler conteúdo
+4. Use read_note APENAS quando precisar do conteúdo COMPLETO de uma nota específica já identificada
+
+QUANDO USAR CADA FERRAMENTA:
+- search_vault → descoberta semântica, correlações, "quais notas falam sobre X?"
+- graph_search → mapear redes de conhecimento, clusters conectados por wiki links
+- get_neighbors → explorar conexões de uma nota específica já conhecida
+- list_notes → ver estrutura de pastas e caminhos (não conteúdo)
+- read_note → ler conteúdo de nota JÁ identificada como relevante
+
 GRAFO DE CONHECIMENTO:
 - get_neighbors: vizinhos diretos (1 hop) de uma nota — rápido para explorar conexões imediatas
 - graph_search: BFS depth=2 para mapear clusters temáticos — use quando precisar entender contexto amplo
-- search_vault suporta filtro por tags= e date_from= para buscas precisas sem varredura total
+- search_vault retorna connected_notes de cada resultado (notas conectadas no grafo)
 
 REGRAS DE EXECUÇÃO:
 - Execute a tarefa COMPLETA até o fim. Se há 50 notas para processar, processe as 50.
