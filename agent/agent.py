@@ -38,7 +38,7 @@ def _col_name(vault: str) -> str:
     col = _INVALID_COL.sub("_", vault)[:63]
     return col or "vault"
 
-MAX_ROUNDS = 200
+MAX_ROUNDS = 500
 
 _embed_model  = None
 _chroma       = None
@@ -386,8 +386,12 @@ def repair_vault(db: str = None) -> dict:
         "sources": fixed,
     }
 
+_INTERNAL_DOCS = {"obsydian_livesync_version", "obsidian_livesync_version"}
+
 def _is_settings_note(note_id: str) -> bool:
-    """Retorna True se a nota pertence à pasta 00-meta (config do agente)."""
+    """Retorna True se a nota pertence à pasta 00-meta ou é doc interno do LiveSync."""
+    if note_id in _INTERNAL_DOCS:
+        return True
     parts = note_id.split("/")
     return "00-meta" in parts
 
@@ -802,6 +806,12 @@ def ingest_zip(content: bytes, vault: Optional[str] = None, db: str = None) -> d
 def tool_move_note(source_id: str, dest_id: str, db: str = None) -> str:
     """Move/renomeia uma nota: copia conteúdo para o novo ID e marca o original como deleted."""
     import time, hashlib
+    source_id = source_id.lower().strip()
+    dest_id   = dest_id.lower().strip()
+    if source_id == dest_id:
+        return f"Nota já está em '{dest_id}' — nenhuma ação necessária."
+    if _is_settings_note(source_id):
+        return f"Nota '{source_id}' é interna/protegida e não pode ser movida."
     try:
         src_doc = _couch("get", source_id, db=db)
         if src_doc.get("deleted"):
@@ -1132,6 +1142,17 @@ REGRAS DE EXECUÇÃO:
 - Ao reorganizar pastas: use move_note (não criar + deletar manualmente).
 - Ao padronizar tags: use add_tags (mais seguro que edit_note para só adicionar tags).
 - Ao deletar duplicatas: confirme que o conteúdo foi movido antes de usar delete_note.
+
+RESPEITO À INTENÇÃO DO USUÁRIO — CRÍTICO:
+- Se o usuário disser "só analise", "não mova ainda", "mostre primeiro", "me pergunte antes" → chame done com a PROPOSTA em texto. NUNCA execute move_note/edit_note/delete_note/create_note sem confirmação explícita.
+- Se o usuário disser "faça", "execute", "aplique", "pode mover" → execute sem pedir confirmação.
+- Dúvida sobre a intenção? Trate como "só análise" e apresente a proposta no done.
+
+RASTREAMENTO DE ESTADO — CRÍTICO:
+- Antes de mover uma nota, verifique mentalmente se ela já foi movida nesta sessão.
+- NUNCA tente mover uma nota para o mesmo caminho onde ela já está.
+- Se um move_note retornar erro indicando que a nota não existe no source, ela já foi movida — pule.
+- Mantenha uma lista mental de "já processados" e não processe duas vezes.
 
 REGRAS DE KNOWLEDGE GRAPH:
 - Wiki links SEMPRE com alias: [[caminho/nota|Nome Visível]]
