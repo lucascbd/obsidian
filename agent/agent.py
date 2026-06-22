@@ -388,7 +388,113 @@ def repair_vault(db: str = None) -> dict:
 
 _INTERNAL_DOCS = {"obsydian_livesync_version", "obsidian_livesync_version"}
 
-def _is_settings_note(note_id: str) -> bool:
+
+def _chunk_text(text: str, size: int = 400, overlap: int = 50) -> list:
+    words = text.split()
+    if not words:
+        return []
+    chunks, i = [], 0
+    while i < len(words):
+        chunks.append(" ".join(words[i:i + size]))
+        i += size - overlap
+    return chunks
+
+
+def _parse_frontmatter(content: str) -> dict:
+    meta: dict = {}
+    if not content.startswith("---"):
+        return meta
+    end = content.find("\n---", 3)
+    if end == -1:
+        return meta
+    fm = content[3:end]
+    for key, pat in [("title", r"^title:\s*(.+)$"), ("date", r"^date:\s*(.+)$"), ("source", r"^source:\s*(.+)$")]:
+        m = re.search(pat, fm, re.MULTILINE)
+        if m:
+            meta[key] = m.group(1).strip().strip("\"'")
+    m = re.search(r"^tags:(.*?)(?=\n\S|\Z)", fm, re.MULTILINE | re.DOTALL)
+    if m:
+        block = m.group(1)
+        tags = re.findall(r"[\-\*]\s*(\S+)", block)
+        if not tags:
+            tags = [t.strip().strip("\"'") for t in block.strip().strip("[]").split(",") if t.strip()]
+        if tags:
+            meta["tags"] = ",".join(tags[:10])
+    return meta
+
+
+def reindex_vault(vault: Optional[str] = None) -> dict:
+    """Reconstrói do zero a coleção ChromaDB de um vault: deleta, re-embedda e re-indexa todas as notas."""
+    vaults_to_run = [vault] if vault else get_vaults()
+    results = []
+
+    for v in vaults_to_run:
+        col_nm = _col_name(v)
+        chroma = get_chroma()
+        model  = get_embed_model()
+
+        # Deleta coleção antiga
+        try:
+            chroma.delete_collection(col_nm)
+            log.info(f"[reindex] Coleção '{col_nm}' deletada")
+        except Exception:
+            pass
+
+        col = chroma.get_or_create_collection(col_nm)
+        log.info(f"[reindex] Coleção '{col_nm}' criada")
+
+        skip, limit, indexed, errors = 0, 100, 0, 0
+        while True:
+            try:
+                r = requests.get(
+                    f"{COUCHDB_URL}/{v}/_all_docs",
+                    params={"include_docs": True, "limit": limit, "skip": skip},
+                    auth=COUCHDB_AUTH, timeout=30,
+                )
+                rows = r.json().get("rows", [])
+            except Exception as e:
+                log.error(f"[reindex] _all_docs erro: {e}")
+                break
+            if not rows:
+                break
+
+            for row in rows:
+                doc = row.get("doc", {})
+                nid = doc.get("_id", "")
+                if (not nid or nid.startswith("_") or nid.startswith("h:")
+                        or doc.get("deleted") or _is_settings_note(nid)):
+                    continue
+                try:
+                    content = _read_note_content(doc, db=v)
+                    if not content or not content.strip():
+                        continue
+                    fm     = _parse_frontmatter(content)
+                    chunks = _chunk_text(content)
+                    if not chunks:
+                        continue
+                    embeddings = [e.tolist() for e in model.embed(chunks)]
+                    base_meta  = {"note_id": nid, "vault": v, **fm}
+                    col.add(
+                        documents  = chunks,
+                        embeddings = embeddings,
+                        ids        = [f"{v}__{nid}__c{i}" for i in range(len(chunks))],
+                        metadatas  = [{**base_meta, "chunk": i} for i in range(len(chunks))],
+                    )
+                    indexed += 1
+                except Exception as e:
+                    log.error(f"[reindex] Erro em {nid}: {e}")
+                    errors += 1
+
+            skip += limit
+
+        msg = f"[{v}] {indexed} nota(s) reindexadas" + (f", {errors} erro(s)" if errors else "")
+        log.info(msg)
+        results.append(msg)
+
+    return {
+        "answer": "✅ Reindexação concluída:\n" + "\n".join(f"- {r}" for r in results),
+        "sources": [],
+    }
     """Retorna True se a nota pertence à pasta 00-meta ou é doc interno do LiveSync."""
     if note_id in _INTERNAL_DOCS:
         return True
