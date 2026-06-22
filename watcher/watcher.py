@@ -292,8 +292,22 @@ def ensure_vault_watched(vault: str, chroma: chromadb.HttpClient, model: TextEmb
     t = _vault_threads.get(vault)
     if t and t.is_alive():
         return
-    log.info(f"[{vault}] Novo vault — iniciando reindexação e watch")
-    full_reindex(vault, chroma, model)
+
+    # Verifica se a coleção já existe (pode ter sido criada pelo agent/reindex externo)
+    col_nm = _col_name(vault)
+    col_exists = False
+    try:
+        chroma.get_collection(col_nm)
+        col_exists = True
+    except Exception:
+        pass
+
+    if col_exists:
+        log.info(f"[{vault}] Coleção já existe — pulando full_reindex, iniciando watch")
+    else:
+        log.info(f"[{vault}] Novo vault — iniciando reindexação e watch")
+        full_reindex(vault, chroma, model)
+
     t = threading.Thread(target=watch_vault, args=(vault, chroma, model), daemon=True, name=f"watch-{vault}")
     t.start()
     _vault_threads[vault] = t

@@ -474,12 +474,22 @@ def reindex_vault(vault: Optional[str] = None) -> dict:
                         continue
                     embeddings = [e.tolist() for e in model.embed(chunks)]
                     base_meta  = {"note_id": nid, "vault": v, **fm}
-                    col.add(
-                        documents  = chunks,
-                        embeddings = embeddings,
-                        ids        = [f"{v}__{nid}__c{i}" for i in range(len(chunks))],
-                        metadatas  = [{**base_meta, "chunk": i} for i in range(len(chunks))],
-                    )
+                    # Retry se a coleção sumiu (race com watcher)
+                    for attempt in range(3):
+                        try:
+                            col.add(
+                                documents  = chunks,
+                                embeddings = embeddings,
+                                ids        = [f"{v}__{nid}__c{i}" for i in range(len(chunks))],
+                                metadatas  = [{**base_meta, "chunk": i} for i in range(len(chunks))],
+                            )
+                            break
+                        except Exception as e:
+                            if attempt < 2 and ("does not exist" in str(e) or "400" in str(e)):
+                                log.warning(f"[reindex] Coleção sumiu, recriando... ({attempt+1}/3)")
+                                col = chroma.get_or_create_collection(col_nm)
+                            else:
+                                raise
                     indexed += 1
                 except Exception as e:
                     log.error(f"[reindex] Erro em {nid}: {e}")
