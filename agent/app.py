@@ -9,7 +9,7 @@ import logging
 import threading
 from flask import Flask, request, jsonify, render_template_string, Response, stream_with_context
 from flask_cors import CORS
-from agent import ask, weekly_summary, summarize_meeting, vault_review, normalize_tags, repair_vault, purge_vault, purge_orphan_leaves, ingest_file, ingest_url, ingest_zip, get_vaults, stop_agent, reset_stop, tool_read_note, reindex_vault, COUCHDB_URL, COUCHDB_DB, COUCHDB_AUTH
+from agent import ask, weekly_summary, summarize_meeting, vault_review, normalize_tags, repair_vault, purge_vault, purge_orphan_leaves, ingest_file, ingest_url, ingest_zip, get_vaults, stop_agent, reset_stop, tool_read_note, reindex_vault, generate_output, COUCHDB_URL, COUCHDB_DB, COUCHDB_AUTH
 
 logging.basicConfig(
     level=logging.INFO,
@@ -102,6 +102,16 @@ HTML = """<!DOCTYPE html>
   .ft-children{padding-left:10px;border-left:1px solid var(--border);margin-left:8px}
   .ft-file{cursor:pointer;color:var(--muted);font-size:11px;padding:2px 8px;display:flex;align-items:center;gap:5px;border-radius:5px;font-family:'JetBrains Mono',monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .ft-file:hover{background:var(--surface2);color:var(--label)}
+  .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:1000;display:none;align-items:center;justify-content:center}
+  .modal-overlay.open{display:flex}
+  .modal{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px;width:420px;max-width:90vw;display:flex;flex-direction:column;gap:14px}
+  .modal h3{font-size:14px;font-weight:600}
+  .modal select,.modal input{background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:8px 11px;font-size:13px;color:var(--text);font-family:'Inter',sans-serif;outline:none;width:100%}
+  .modal select:focus,.modal input:focus{border-color:var(--accent)}
+  .modal-btns{display:flex;gap:8px;justify-content:flex-end}
+  .modal-btns button{padding:8px 16px;border-radius:7px;font-size:13px;cursor:pointer;font-family:'Inter',sans-serif;border:none}
+  .btn-cancel{background:var(--surface2);color:var(--label)}
+  .btn-ok{background:var(--accent);color:#fff;font-weight:500}
 </style>
 </head>
 <body>
@@ -133,6 +143,7 @@ HTML = """<!DOCTYPE html>
     <button class="s-btn" onclick="reindex()">🔄 Reindexar ChromaDB</button>
     <button class="s-btn" onclick="correlate()">🔗 Correlacionar notas</button>
     <button class="s-btn" onclick="normalizeTags()">🏷️ Normalizar tags</button>
+    <button class="s-btn" onclick="openGenModal()">✨ Gerar conteúdo</button>
     <div class="s-label">Filtrar busca</div>
     <button class="s-btn active" id="f-all" onclick="setFilter(null,this)">🗂 Tudo</button>
     <div id="filter-roots"></div>
@@ -556,6 +567,51 @@ HTML = """<!DOCTYPE html>
 
   loadRoots();
 </script>
+
+<div class="modal-overlay" id="gen-modal">
+  <div class="modal">
+    <h3>✨ Gerar conteúdo</h3>
+    <select id="gen-template">
+      <option value="relatorio">📊 Relatório</option>
+      <option value="email">📧 Email</option>
+      <option value="apresentacao">🗂 Apresentação</option>
+      <option value="resumo">📝 Resumo Executivo</option>
+    </select>
+    <input id="gen-topic" placeholder="Tema ou pergunta (ex: análise da Haleon 2024)">
+    <div class="modal-btns">
+      <button class="btn-cancel" onclick="closeGenModal()">Cancelar</button>
+      <button class="btn-ok" onclick="submitGenerate()">Gerar</button>
+    </div>
+  </div>
+</div>
+
+<script>
+function openGenModal() {
+  document.getElementById('gen-modal').classList.add('open');
+  document.getElementById('gen-topic').focus();
+}
+function closeGenModal() {
+  document.getElementById('gen-modal').classList.remove('open');
+}
+async function submitGenerate() {
+  var topic    = document.getElementById('gen-topic').value.trim();
+  var template = document.getElementById('gen-template').value;
+  if (!topic) return;
+  closeGenModal();
+  appendMsg('user', '✨ Gerar ' + document.getElementById('gen-template').options[document.getElementById('gen-template').selectedIndex].text + ': ' + topic);
+  appendTyping();
+  setBusy(true);
+  try {
+    var r = await fetch('/api/generate', {method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({topic:topic, template:template, vault:getRoot()})});
+    var d = await r.json();
+    removeTyping(); appendMsg('agent', d.answer, d.sources);
+  } catch(e) { removeTyping(); appendMsg('agent', '❌ Erro ao gerar.'); }
+  setBusy(false);
+}
+// Fechar modal com Escape
+document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closeGenModal(); });
+</script>
 </body>
 </html>
 """
@@ -928,6 +984,17 @@ def api_note_read():
         return jsonify({"error": "note_id obrigatório"}), 400
     content = tool_read_note(note_id, db=vault)
     return jsonify({"note_id": note_id, "content": content})
+
+
+@app.route("/api/generate", methods=["POST"])
+def api_generate():
+    data     = request.get_json(silent=True) or {}
+    topic    = data.get("topic", "").strip()
+    template = data.get("template", "relatorio")
+    vault    = data.get("vault") or None
+    if not topic:
+        return jsonify({"error": "topic obrigatório"}), 400
+    return jsonify(generate_output(topic, template, vault=vault))
 
 
 @app.route("/health")

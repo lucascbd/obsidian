@@ -420,6 +420,16 @@ def _parse_frontmatter(content: str) -> dict:
             tags = [t.strip().strip("\"'") for t in block.strip().strip("[]").split(",") if t.strip()]
         if tags:
             meta["tags"] = ",".join(tags[:10])
+    # Extração de entidades
+    for entity_key in ("people", "companies", "projects", "related"):
+        m = re.search(rf"^{entity_key}:(.*?)(?=\n\S|\Z)", fm, re.MULTILINE | re.DOTALL)
+        if m:
+            block = m.group(1)
+            items = re.findall(r"[\-\*]\s*(.+)", block)
+            if not items:
+                items = [t.strip().strip("\"'") for t in block.strip().strip("[]").split(",") if t.strip()]
+            if items:
+                meta[entity_key] = ",".join(i.strip() for i in items[:20])
     return meta
 
 
@@ -1408,6 +1418,82 @@ def _call_llm_raw(messages: list) -> str:
         fn = tc.get("function", {})
         content = json.dumps({"tool": fn.get("name"), "args": json.loads(fn.get("arguments", "{}"))})
     return content.strip()
+
+
+GENERATE_TEMPLATES = {
+    "relatorio": {
+        "label": "Relatório",
+        "system": "Você é um analista especialista. Gere um relatório estruturado, profissional e baseado APENAS nos dados do vault fornecidos.",
+        "format": "# {titulo}\n\n## Resumo Executivo\n\n## Contexto\n\n## Análise\n\n## Conclusões\n\n## Recomendações",
+    },
+    "email": {
+        "label": "Email",
+        "system": "Você é um assistente de comunicação. Gere um email profissional e objetivo baseado APENAS nos dados do vault fornecidos.",
+        "format": "**Assunto:** ...\n\nOlá [nome],\n\n[corpo do email]\n\nAtenciosamente,\n[remetente]",
+    },
+    "apresentacao": {
+        "label": "Apresentação",
+        "system": "Você é um consultor de comunicação. Gere o roteiro detalhado de uma apresentação com slides, baseado APENAS nos dados do vault fornecidos.",
+        "format": "## Slide 1 — Título e subtítulo\n\n## Slide 2 — Agenda\n\n## Slide N — [tema]\n**Pontos-chave:**\n- ...\n\n## Slide Final — Conclusão e próximos passos",
+    },
+    "resumo": {
+        "label": "Resumo Executivo",
+        "system": "Você é um analista sênior. Gere um resumo executivo conciso e direto baseado APENAS nos dados do vault fornecidos.",
+        "format": "**Situação:** ...\n\n**Análise:** ...\n\n**Decisão/Recomendação:** ...\n\n**Próximos passos:** ...",
+    },
+}
+
+
+def generate_output(topic: str, template: str = "relatorio",
+                    vault: Optional[str] = None, extra_note_ids: Optional[list] = None) -> dict:
+    """Gera output estruturado (relatório, email, etc.) usando buscas semânticas no vault."""
+    tmpl = GENERATE_TEMPLATES.get(template, GENERATE_TEMPLATES["relatorio"])
+    db   = vault
+
+    # Múltiplas queries para cobrir diferentes ângulos
+    queries = [topic, f"análise {topic}", f"contexto {topic}", f"dados {topic}", f"decisões {topic}"]
+    context_chunks: list[str] = []
+    seen: set[str] = set()
+
+    for q in queries:
+        try:
+            raw     = tool_search_vault(q, db=db)
+            results = json.loads(raw)
+            for r in results[:4]:
+                nid = r.get("note_id", "")
+                if nid and nid not in seen:
+                    seen.add(nid)
+                    title   = r.get("title") or nid.split("/")[-1].replace(".md", "")
+                    excerpt = r.get("excerpt", "")
+                    context_chunks.append(f"### [{nid}] {title}\n{excerpt}")
+        except Exception:
+            pass
+
+    # Notas extras explicitamente solicitadas
+    for nid in (extra_note_ids or [])[:5]:
+        if nid not in seen:
+            seen.add(nid)
+            content = tool_read_note(nid, db=db)
+            context_chunks.append(f"### [{nid}]\n{content[:3000]}")
+
+    if not context_chunks:
+        return {"answer": f"Nenhuma nota encontrada sobre '{topic}' no vault.", "sources": []}
+
+    context = "\n\n---\n\n".join(context_chunks[:20])
+    prompt  = (
+        f"Gere um(a) **{tmpl['label']}** sobre o tema: **{topic}**\n\n"
+        f"Use SOMENTE as informações das notas do vault abaixo. Não invente dados.\n\n"
+        f"Formato esperado:\n{tmpl['format']}\n\n"
+        f"NOTAS DO VAULT ({len(context_chunks)} notas):\n\n{context}\n\n"
+        f"Gere o(a) {tmpl['label']} completo agora em português:"
+    )
+
+    result = _call_llm_raw([
+        {"role": "system", "content": tmpl["system"]},
+        {"role": "user",   "content": prompt},
+    ])
+
+    return {"answer": result, "sources": sorted(seen), "template": template}
 
 
 def ask(question: str, collections: Optional[list] = None, vault: Optional[str] = None,

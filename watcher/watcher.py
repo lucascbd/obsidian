@@ -50,15 +50,65 @@ def _is_settings(note_id: str) -> bool:
     return "00-meta" in note_id.split("/")
 
 
-def chunk_text(text: str) -> list[str]:
-    words = text.split()
-    if not words:
-        return []
-    chunks, i = [], 0
-    while i < len(words):
-        chunks.append(" ".join(words[i : i + CHUNK_SIZE]))
-        i += CHUNK_SIZE - CHUNK_OVERLAP
-    return chunks
+def chunk_by_sections(content: str, max_words: int = 350) -> list[str]:
+    """Chunking por seções Markdown, preservando contexto hierárquico.
+    Cada chunk: frontmatter + breadcrumb de headings pais + conteúdo da seção."""
+    # Separa frontmatter
+    fm = ""
+    body = content
+    if content.startswith("---"):
+        end = content.find("\n---", 3)
+        if end != -1:
+            fm = content[:end + 4].strip()
+            body = content[end + 4:].strip()
+
+    segments = re.split(r'(?m)(?=^#{1,3} )', body)
+    chunks = []
+    h_stack: list[str] = []
+
+    for seg in segments:
+        seg = seg.strip()
+        if not seg:
+            continue
+        first_line = seg.split('\n')[0]
+        hm = re.match(r'^(#{1,3}) (.+)', first_line)
+        if hm:
+            level = len(hm.group(1))
+            h_stack = h_stack[:level - 1]
+            h_stack.append(hm.group(2).strip())
+
+        ctx_parts = []
+        if fm:
+            ctx_parts.append(fm)
+        if len(h_stack) > 1:
+            ctx_parts.append("Contexto: " + " › ".join(h_stack[:-1]))
+        ctx = "\n\n".join(ctx_parts)
+        full_seg = (ctx + "\n\n" + seg).strip() if ctx else seg
+
+        words = full_seg.split()
+        if len(words) <= max_words:
+            if full_seg:
+                chunks.append(full_seg)
+        else:
+            heading_line = seg.split('\n')[0]
+            body_words = '\n'.join(seg.split('\n')[1:]).split()
+            step = max(50, max_words - len((ctx + "\n\n" + heading_line).split()) - 30)
+            for i in range(0, max(1, len(body_words)), step):
+                sub = " ".join(body_words[i:i + step])
+                sub_chunk = ((ctx + "\n\n" + heading_line + "\n" + sub) if ctx else (heading_line + "\n" + sub)).strip()
+                if sub_chunk:
+                    chunks.append(sub_chunk)
+
+    if not chunks:
+        # fallback: chunking por palavras
+        words = content.split()
+        size, overlap = 400, 50
+        i = 0
+        while i < len(words):
+            chunks.append(" ".join(words[i:i + size]))
+            i += size - overlap
+
+    return [c for c in chunks if c.strip()]
 
 
 def parse_frontmatter(content: str) -> dict:
@@ -85,6 +135,16 @@ def parse_frontmatter(content: str) -> dict:
             tags = [t.strip().strip("\"'") for t in block.strip().strip("[]").split(",") if t.strip()]
         if tags:
             meta["tags"] = ",".join(tags[:10])
+    # Extração de entidades
+    for entity_key in ("people", "companies", "projects", "related"):
+        m = re.search(rf"^{entity_key}:(.*?)(?=\n\S|\Z)", fm, re.MULTILINE | re.DOTALL)
+        if m:
+            block = m.group(1)
+            items = re.findall(r"[\-\*]\s*(.+)", block)
+            if not items:
+                items = [t.strip().strip("\"'") for t in block.strip().strip("[]").split(",") if t.strip()]
+            if items:
+                meta[entity_key] = ",".join(i.strip() for i in items[:20])
     return meta
 
 
@@ -137,21 +197,33 @@ def _read_link_graph(vault: str) -> dict:
 
 
 def _write_link_graph(vault: str, doc: dict):
-    try:
-        requests.put(f"{COUCHDB_URL}/{vault}/{LINK_GRAPH_DOC}", json=doc, auth=AUTH, timeout=10)
-    except Exception as e:
-        log.warning(f"[{vault}] link-graph write: {e}")
+    r = requests.put(f"{COUCHDB_URL}/{vault}/{LINK_GRAPH_DOC}", json=doc, auth=AUTH, timeout=10)
+    if r.status_code == 409:
+        raise requests.HTTPError(response=r)
+    # outros erros: loga mas não levanta
 
 
 def update_link_graph(vault: str, note_id: str, links: list[str], deleted: bool = False):
-    doc = _read_link_graph(vault)
-    link_map: dict = doc.get("links", {})
-    if deleted or not links:
-        link_map.pop(note_id, None)
-    else:
-        link_map[note_id] = links
-    doc["links"] = link_map
-    _write_link_graph(vault, doc)
+    for attempt in range(5):
+        try:
+            doc = _read_link_graph(vault)
+            link_map: dict = doc.get("links", {})
+            if deleted or not links:
+                link_map.pop(note_id, None)
+            else:
+                link_map[note_id] = links
+            doc["links"] = link_map
+            _write_link_graph(vault, doc)
+            return
+        except requests.HTTPError as e:
+            if getattr(e.response, 'status_code', None) == 409 and attempt < 4:
+                time.sleep(0.1 * (2 ** attempt))
+                continue
+            log.warning(f"[{vault}] link-graph write falhou após {attempt+1} tentativas: {e}")
+            return
+        except Exception as e:
+            log.warning(f"[{vault}] link-graph update erro: {e}")
+            return
 
 
 # ── Indexação ─────────────────────────────────────────────────────────────────
@@ -179,7 +251,7 @@ def index_note(doc: dict, vault: str, col, model: TextEmbedding):
     except Exception:
         pass
 
-    chunks = chunk_text(content)
+    chunks = chunk_by_sections(content)
     if not chunks:
         return
 
