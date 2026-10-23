@@ -1,5 +1,5 @@
 """
-agent.py — Agente com tool calling: lê e escreve no vault via CouchDB/ChromaDB.
+agent.py — Agente com tool calling: lê e escreve no vault em disco + ChromaDB.
 """
 
 import os
@@ -9,40 +9,47 @@ import json
 import logging
 import unicodedata
 import requests
-import chromadb
+from pathlib import Path
 from typing import Optional
-from fastembed import TextEmbedding
+
+from core import vault_fs, state, indexer
+from core.config import VAULT_ROOT, DATA_DIR, EMBEDDING_MODEL, col_name as _col_name, is_meta
+from core.text import (
+    parse_frontmatter as _parse_frontmatter_core,
+    chunk_by_sections,
+    normalize_tag as _normalize_tag,
+    fix_codeblock_frontmatter as _fix_codeblock_frontmatter,
+    fix_tags_in_frontmatter as _fix_tags_in_frontmatter,
+)
 
 log = logging.getLogger(__name__)
 
-CHROMA_HOST      = os.environ.get("CHROMADB_HOST", "chromadb")
-CHROMA_PORT      = int(os.environ.get("CHROMADB_PORT", 8000))
 OPENROUTER_KEY   = os.environ["OPENROUTER_API_KEY"]
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "nousresearch/hermes-3-llama-3.1-70b")
 OPENROUTER_URL   = "https://openrouter.ai/api/v1/chat/completions"
-EMBEDDING_MODEL  = os.environ.get("EMBEDDING_MODEL", "intfloat/multilingual-e5-large")
-LINK_GRAPH_DOC   = "_local/link-graph"
 
-COUCHDB_URL  = os.environ.get("COUCHDB_URL", "http://couchdb:5984")
-COUCHDB_USER = os.environ.get("COUCHDB_USER", "")
-COUCHDB_PASS = os.environ.get("COUCHDB_PASSWORD", "")
-COUCHDB_DB   = os.environ.get("COUCHDB_DB", "obsidian-vault")
-COUCHDB_AUTH = (COUCHDB_USER, COUCHDB_PASS)
-
-import re as _re
-_INVALID_COL = _re.compile(r"[^a-zA-Z0-9_-]")
+# Vault padrão: primeiro subdiretório de VAULT_ROOT, ou o configurado.
+DEFAULT_VAULT = os.environ.get("DEFAULT_VAULT", "")
 
 
-def _col_name(vault: str) -> str:
-    """Uma coleção ChromaDB por vault (mesmo esquema do watcher)."""
-    col = _INVALID_COL.sub("_", vault)[:63]
-    return col or "vault"
+def _default_vault() -> str:
+    if DEFAULT_VAULT:
+        return DEFAULT_VAULT
+    vaults = vault_fs.get_vaults()
+    return vaults[0] if vaults else "personal"
 
 MAX_ROUNDS = 500
 
-_embed_model  = None
-_chroma       = None
 _stop_event   = __import__("threading").Event()
+
+
+# Chroma/embeddings compartilham o singleton do indexer (um cliente por processo).
+def get_embed_model():
+    return indexer.get_model()
+
+
+def get_chroma():
+    return indexer.get_chroma()
 
 
 def stop_agent():
@@ -69,86 +76,17 @@ _PENDING_PATTERNS = [
 _PENDING_RE = re.compile("|".join(_PENDING_PATTERNS), re.IGNORECASE)
 
 
-def get_embed_model():
-    global _embed_model
-    if _embed_model is None:
-        log.info(f"Carregando modelo de embeddings: {EMBEDDING_MODEL}")
-        _embed_model = TextEmbedding(EMBEDDING_MODEL)
-    return _embed_model
-
-
-def get_chroma():
-    global _chroma
-    if _chroma is None:
-        _chroma = chromadb.HttpClient(host=CHROMA_HOST, port=CHROMA_PORT)
-    return _chroma
-
-
-# ── CouchDB ───────────────────────────────────────────────────────────────────
-def _couch(method: str, path: str, db: str = None, **kwargs):
-    _db = db or COUCHDB_DB
-    url = f"{COUCHDB_URL}/{_db}/{requests.utils.quote(path, safe='')}"
-    r = getattr(requests, method)(url, auth=COUCHDB_AUTH, timeout=15, **kwargs)
-    r.raise_for_status()
-    return r.json()
-
-
-def _read_note_content(doc: dict, db: str = None) -> str:
-    parts = []
-    for leaf_id in doc.get("children", []):
-        try:
-            leaf = _couch("get", leaf_id, db=db)
-            parts.append(leaf.get("data", ""))
-        except Exception:
-            pass
-    return "".join(parts)
-
-
-def _write_note_content(doc: dict, new_content: str, db: str = None) -> bool:
-    import time
-
-    children = doc.get("children", [])
-    if not children:
-        return False
-
-    leaves = []
-    for leaf_id in children:
-        try:
-            leaves.append(_couch("get", leaf_id, db=db))
-        except Exception:
-            return False
-
-    total = sum(len(l.get("data", "")) for l in leaves) or 1
-    written = 0
-    for i, leaf in enumerate(leaves):
-        if i == len(leaves) - 1:
-            chunk = new_content[written:]
-        else:
-            size = max(1, round(len(new_content) * len(leaf.get("data", "")) / total))
-            chunk = new_content[written:written + size]
-            written += size
-        leaf["data"] = chunk
-        _couch("put", leaf["_id"], db=db, json=leaf)
-
-    fresh = _couch("get", doc["_id"], db=db)
-    fresh["size"]  = len(new_content.encode("utf-8"))
-    fresh["mtime"] = int(time.time() * 1000)
-    _couch("put", fresh["_id"], db=db, json=fresh)
-    return True
+# ── Vault em disco ──────────────────────────────────────────────────────────────
+def _vault(db: str = None) -> str:
+    """Resolve o nome do vault a usar (subdiretório de VAULT_ROOT)."""
+    return db or _default_vault()
 
 
 def get_vaults() -> list:
-    """Lista os bancos de dados CouchDB disponíveis (cada um é um vault)."""
-    system_dbs = {"_users", "_replicator", "_global_changes"}
-    try:
-        r = requests.get(f"{COUCHDB_URL}/_all_dbs", auth=COUCHDB_AUTH, timeout=10)
-        r.raise_for_status()
-        vaults = [v for v in r.json() if v not in system_dbs]
-        log.info(f"get_vaults: {vaults}")
-        return vaults
-    except Exception as e:
-        log.error(f"Erro ao listar vaults: {e}")
-        return []
+    """Cada subdiretório de VAULT_ROOT é um vault."""
+    vaults = vault_fs.get_vaults()
+    log.info(f"get_vaults: {vaults}")
+    return vaults
 
 
 def get_root_folders() -> list:
@@ -210,12 +148,11 @@ def load_settings(vault: str, db: str = None) -> dict:
         "load":    "00-meta/config/load.md",
         "mem":     "00-meta/config/agent-mem.md",
     }
+    v = _vault(db)
     for key, note_id in mapping.items():
         try:
-            doc = _couch("get", note_id, db=db)
-            if not doc.get("deleted"):
-                content = _read_note_content(doc, db=db)
-                settings[key] = content
+            if vault_fs.exists(v, note_id):
+                settings[key] = vault_fs.read_note(v, note_id)
         except Exception:
             pass
     return settings
@@ -242,29 +179,24 @@ def save_session_memory(vault: str, question: str, answer: str, sources: list,
         f"---\n"
     )
 
+    v = _vault(db)
     try:
-        doc = _couch("get", note_id, db=db)
-        if doc.get("deleted"):
-            raise Exception("nota deletada")
-        existing = _read_note_content(doc, db=db)
-        _write_note_content(doc, existing + new_entry, db=db)
+        existing = vault_fs.read_note(v, note_id) if vault_fs.exists(v, note_id) else "# Memória de Sessões\n"
+        vault_fs.write_note(v, note_id, existing + new_entry)
     except Exception:
         tool_create_note(note_id, f"# Memória de Sessões\n{new_entry}", db=db)
 
 
 def tool_ensure_settings(vault: str, db: str = None) -> str:
     """Cria 00-meta/config/profile.md e load.md com conteúdo padrão se não existirem."""
+    v = _vault(db)
     created = []
     for note_id, default_content in [
         ("00-meta/config/profile.md", DEFAULT_PROFILE_MD),
         ("00-meta/config/load.md",    DEFAULT_LOAD_MD),
     ]:
-        try:
-            doc = _couch("get", note_id, db=db)
-            if not doc.get("deleted"):
-                continue
-        except Exception:
-            pass
+        if vault_fs.exists(v, note_id):
+            continue
         result = tool_create_note(note_id, default_content, db=db)
         created.append(f"{note_id}: {result}")
 
@@ -275,243 +207,50 @@ def tool_ensure_settings(vault: str, db: str = None) -> str:
 
 # ── Tools disponíveis para o agente ──────────────────────────────────────────
 def purge_vault(keep_prefix: Optional[str] = None, db: str = None) -> dict:
-    """Marca todas as notas ativas como deleted=true no CouchDB (formato LiveSync).
-    keep_prefix: se fornecido, preserva notas que começam com esse prefixo."""
-    import time
-    _db = db or COUCHDB_DB
-    r = requests.get(
-        f"{COUCHDB_URL}/{_db}/_all_docs",
-        params={"include_docs": True},
-        auth=COUCHDB_AUTH, timeout=30,
-    )
-    r.raise_for_status()
+    """Apaga do disco todas as notas do vault (exceto 00-meta e, se dado, keep_prefix)."""
+    v = _vault(db)
     purged, skipped = [], []
-    for row in r.json().get("rows", []):
-        doc = row.get("doc", {})
-        nid = row["id"]
-        if nid.startswith("_") or nid.startswith("h:") or nid == "obsydian_livesync_version":
-            continue
-        if doc.get("deleted"):
-            continue
-        if keep_prefix and nid.startswith(keep_prefix):
-            skipped.append(nid)
+    for note_id in vault_fs.list_notes(v):
+        if keep_prefix and note_id.startswith(keep_prefix):
+            skipped.append(note_id)
             continue
         try:
-            doc["deleted"] = True
-            doc["mtime"]   = int(time.time() * 1000)
-            _couch("put", nid, json=doc, db=_db)
-            purged.append(nid)
-            log.info(f"Purged: {nid}")
+            if vault_fs.delete_note(v, note_id):
+                indexer.remove_note(v, note_id)
+                purged.append(note_id)
         except Exception as e:
-            log.error(f"Erro ao purgar {nid}: {e}")
+            log.error(f"Erro ao purgar {note_id}: {e}")
     return {
-        "answer": f"{len(purged)} nota(s) removida(s) do banco.\n" + "\n".join(f"- {n}" for n in purged),
+        "answer": f"{len(purged)} nota(s) removida(s) do disco.\n" + "\n".join(f"- {n}" for n in purged),
         "sources": purged,
         "skipped": skipped,
     }
 
 
-def purge_orphan_leaves(db: str = None) -> dict:
-    """Remove leaf docs (h:) cujo pai está deletado ou não existe."""
-    _db = db or COUCHDB_DB
-    r = requests.get(
-        f"{COUCHDB_URL}/{_db}/_all_docs",
-        params={"include_docs": True},
-        auth=COUCHDB_AUTH, timeout=30,
-    )
-    r.raise_for_status()
-    rows = r.json().get("rows", [])
-
-    # Coleta todos os leaf IDs referenciados por notas ativas
-    referenced = set()
-    for row in rows:
-        doc = row.get("doc", {})
-        if doc.get("deleted") or row["id"].startswith("h:") or row["id"].startswith("_"):
-            continue
-        referenced.update(doc.get("children", []))
-
-    # Deleta leaves não referenciados
-    removed = []
-    for row in rows:
-        nid = row["id"]
-        if not nid.startswith("h:"):
-            continue
-        if nid in referenced:
-            continue
-        try:
-            doc = row["doc"]
-            requests.delete(
-                f"{COUCHDB_URL}/{_db}/{requests.utils.quote(nid, safe='')}",
-                params={"rev": doc["_rev"]},
-                auth=COUCHDB_AUTH, timeout=10,
-            ).raise_for_status()
-            removed.append(nid)
-        except Exception as e:
-            log.error(f"Erro ao deletar leaf {nid}: {e}")
-
-    return {
-        "answer": f"{len(removed)} leaf(s) órfão(s) removido(s).",
-        "sources": [],
-    }
-
-
-def repair_vault(db: str = None) -> dict:
-    """Corrige size mismatch em documentos do CouchDB."""
-    _db = db or COUCHDB_DB
-    r = requests.get(
-        f"{COUCHDB_URL}/{_db}/_all_docs",
-        params={"include_docs": True},
-        auth=COUCHDB_AUTH, timeout=30,
-    )
-    r.raise_for_status()
-    fixed = []
-    for row in r.json().get("rows", []):
-        doc = row.get("doc", {})
-        if doc.get("deleted") or doc.get("type") != "plain" or doc["_id"].startswith("_") or doc["_id"].startswith("h:"):
-            continue
-        content = _read_note_content(doc, db=_db)
-        real_size = len(content.encode("utf-8"))
-        if doc.get("size", -1) != real_size:
-            import time
-            doc["size"] = real_size
-            doc["mtime"] = int(time.time() * 1000)
-            try:
-                _couch("put", doc["_id"], json=doc, db=_db)
-                fixed.append(f"{doc['_id']} ({doc.get('size', '?')} → {real_size})")
-                log.info(f"Reparado: {doc['_id']}")
-            except Exception as e:
-                log.error(f"Erro ao reparar {doc['_id']}: {e}")
-    return {
-        "answer": f"{len(fixed)} documento(s) reparado(s).\n" + "\n".join(fixed) if fixed else "Nenhum documento com size incorreto encontrado.",
-        "sources": fixed,
-    }
-
-_INTERNAL_DOCS = {"obsydian_livesync_version", "obsidian_livesync_version"}
-
-
-def _chunk_text(text: str, size: int = 400, overlap: int = 50) -> list:
-    words = text.split()
-    if not words:
-        return []
-    chunks, i = [], 0
-    while i < len(words):
-        chunks.append(" ".join(words[i:i + size]))
-        i += size - overlap
-    return chunks
-
-
 def _parse_frontmatter(content: str) -> dict:
-    meta: dict = {}
-    if not content.startswith("---"):
-        return meta
-    end = content.find("\n---", 3)
-    if end == -1:
-        return meta
-    fm = content[3:end]
-    for key, pat in [("title", r"^title:\s*(.+)$"), ("date", r"^date:\s*(.+)$"), ("source", r"^source:\s*(.+)$")]:
-        m = re.search(pat, fm, re.MULTILINE)
-        if m:
-            meta[key] = m.group(1).strip().strip("\"'")
-    m = re.search(r"^tags:(.*?)(?=\n\S|\Z)", fm, re.MULTILINE | re.DOTALL)
-    if m:
-        block = m.group(1)
-        tags = re.findall(r"[\-\*]\s*(\S+)", block)
-        if not tags:
-            tags = [t.strip().strip("\"'") for t in block.strip().strip("[]").split(",") if t.strip()]
-        if tags:
-            meta["tags"] = ",".join(tags[:10])
-    # Extração de entidades
-    for entity_key in ("people", "companies", "projects", "related"):
-        m = re.search(rf"^{entity_key}:(.*?)(?=\n\S|\Z)", fm, re.MULTILINE | re.DOTALL)
-        if m:
-            block = m.group(1)
-            items = re.findall(r"[\-\*]\s*(.+)", block)
-            if not items:
-                items = [t.strip().strip("\"'") for t in block.strip().strip("[]").split(",") if t.strip()]
-            if items:
-                meta[entity_key] = ",".join(i.strip() for i in items[:20])
-    return meta
+    return _parse_frontmatter_core(content)
 
 
 def reindex_vault(vault: Optional[str] = None) -> dict:
-    """Reconstrói do zero a coleção ChromaDB de um vault: deleta, re-embedda e re-indexa todas as notas."""
+    """Reconstrói do zero a coleção ChromaDB a partir do disco e regenera os índices Obsidian."""
     vaults_to_run = [vault] if vault else get_vaults()
     results = []
 
     for v in vaults_to_run:
         col_nm = _col_name(v)
         chroma = get_chroma()
-        model  = get_embed_model()
-
-        # Deleta coleção antiga
+        # Recria a coleção e limpa o estado SQLite (reindexação forçada total).
         try:
             chroma.delete_collection(col_nm)
-            log.info(f"[reindex] Coleção '{col_nm}' deletada")
         except Exception:
             pass
+        for note_id in list(state.known_paths(v)):
+            state.forget_note(v, note_id)
 
         col = chroma.get_or_create_collection(col_nm)
-        log.info(f"[reindex] Coleção '{col_nm}' criada")
+        stats = indexer.reconcile(v, col=col, force=True)
+        results.append(f"[{v}] {stats['indexed']} nota(s) reindexadas")
 
-        skip, limit, indexed, errors = 0, 100, 0, 0
-        while True:
-            try:
-                r = requests.get(
-                    f"{COUCHDB_URL}/{v}/_all_docs",
-                    params={"include_docs": True, "limit": limit, "skip": skip},
-                    auth=COUCHDB_AUTH, timeout=30,
-                )
-                rows = r.json().get("rows", [])
-            except Exception as e:
-                log.error(f"[reindex] _all_docs erro: {e}")
-                break
-            if not rows:
-                break
-
-            for row in rows:
-                doc = row.get("doc", {})
-                nid = doc.get("_id", "")
-                if (not nid or nid.startswith("_") or nid.startswith("h:")
-                        or doc.get("deleted") or _is_settings_note(nid)):
-                    continue
-                try:
-                    content = _read_note_content(doc, db=v)
-                    if not content or not content.strip():
-                        continue
-                    fm     = _parse_frontmatter(content)
-                    chunks = _chunk_text(content)
-                    if not chunks:
-                        continue
-                    embeddings = [e.tolist() for e in model.embed(chunks)]
-                    base_meta  = {"note_id": nid, "vault": v, **fm}
-                    # Retry se a coleção sumiu (race com watcher)
-                    for attempt in range(3):
-                        try:
-                            col.add(
-                                documents  = chunks,
-                                embeddings = embeddings,
-                                ids        = [f"{v}__{nid}__c{i}" for i in range(len(chunks))],
-                                metadatas  = [{**base_meta, "chunk": i} for i in range(len(chunks))],
-                            )
-                            break
-                        except Exception as e:
-                            if attempt < 2 and ("does not exist" in str(e) or "400" in str(e)):
-                                log.warning(f"[reindex] Coleção sumiu, recriando... ({attempt+1}/3)")
-                                col = chroma.get_or_create_collection(col_nm)
-                            else:
-                                raise
-                    indexed += 1
-                except Exception as e:
-                    log.error(f"[reindex] Erro em {nid}: {e}")
-                    errors += 1
-
-            skip += limit
-
-        msg = f"[{v}] {indexed} nota(s) reindexadas" + (f", {errors} erro(s)" if errors else "")
-        log.info(msg)
-        results.append(msg)
-
-        # Gera índices Obsidian em 00-meta/indices/
         try:
             _build_vault_indices(v, col)
             results.append(f"[{v}] índices Obsidian gerados em 00-meta/indices/")
@@ -619,17 +358,14 @@ def _build_vault_indices(vault: str, col) -> None:
 
 
 def _is_settings_note(note_id: str) -> bool:
-    """Retorna True se a nota pertence à pasta 00-meta ou é doc interno do LiveSync."""
-    if note_id in _INTERNAL_DOCS:
-        return True
-    parts = note_id.split("/")
-    return "00-meta" in parts
+    """Retorna True se a nota pertence à pasta 00-meta (índices/config do agente)."""
+    return is_meta(note_id)
 
 
 def tool_search_vault(query: str, collections: Optional[list] = None, db: str = None,
                       tags: Optional[str] = None, date_from: Optional[str] = None) -> str:
     """Busca semântica no vault (uma coleção por vault). Suporta filtro por tags e data."""
-    vault  = db or COUCHDB_DB
+    vault  = _vault(db)
     col_nm = _col_name(vault)
     model  = get_embed_model()
     chroma = get_chroma()
@@ -680,15 +416,8 @@ def tool_search_vault(query: str, collections: Optional[list] = None, db: str = 
 
 
 def _get_link_graph(db: str = None) -> dict:
-    """Lê o grafo de links do CouchDB (_local não replica via LiveSync)."""
-    _db = db or COUCHDB_DB
-    try:
-        r = requests.get(f"{COUCHDB_URL}/{_db}/{LINK_GRAPH_DOC}", auth=COUCHDB_AUTH, timeout=10)
-        if r.status_code == 200:
-            return r.json().get("links", {})
-    except Exception:
-        pass
-    return {}
+    """Lê o grafo de links do SQLite (src → [dst])."""
+    return state.link_graph(_vault(db))
 
 
 def tool_get_neighbors(note_id: str, db: str = None) -> str:
@@ -732,69 +461,43 @@ def tool_graph_search(start_note_id: str, depth: int = 2, db: str = None) -> str
 
 
 def tool_read_note(note_id: str, db: str = None) -> str:
-    """Lê o conteúdo completo de uma nota do CouchDB."""
+    """Lê o conteúdo completo de uma nota do disco."""
+    v = _vault(db)
     try:
-        doc = _couch("get", note_id, db=db)
-        content = _read_note_content(doc, db=db)
+        if not vault_fs.exists(v, note_id):
+            return f"Erro ao ler nota '{note_id}': não encontrada."
+        content = vault_fs.read_note(v, note_id)
         return content if content else "(nota vazia)"
     except Exception as e:
         return f"Erro ao ler nota '{note_id}': {e}"
 
 
 def tool_edit_note(note_id: str, content: str, db: str = None) -> str:
-    """Edita o conteúdo de uma nota existente no CouchDB."""
+    """Edita (sobrescreve) o conteúdo de uma nota existente no disco."""
+    v = _vault(db)
     try:
-        doc = _couch("get", note_id, db=db)
-        if doc.get("deleted"):
-            return f"Nota '{note_id}' está deletada."
-        ok = _write_note_content(doc, content, db=db)
-        return f"Nota '{note_id}' atualizada com sucesso." if ok else "Falha ao salvar."
+        if not vault_fs.exists(v, note_id):
+            return f"Nota '{note_id}' não existe."
+        vault_fs.write_note(v, note_id, content)
+        return f"Nota '{note_id}' atualizada com sucesso."
     except Exception as e:
         return f"Erro ao editar nota '{note_id}': {e}"
 
 
 def tool_list_notes(db: str = None) -> str:
-    """Lista todas as notas ativas (não deletadas) do vault. Exclui notas de 00-meta."""
-    _db = db or COUCHDB_DB
+    """Lista todas as notas do vault (exclui 00-meta)."""
     try:
-        r = requests.get(
-            f"{COUCHDB_URL}/{_db}/_all_docs",
-            params={"include_docs": True},
-            auth=COUCHDB_AUTH, timeout=30,
-        )
-        r.raise_for_status()
-        ids = [
-            row["id"] for row in r.json().get("rows", [])
-            if not row["id"].startswith("_")
-            and not row["id"].startswith("h:")
-            and not row.get("doc", {}).get("deleted")
-            and not _is_settings_note(row["id"])
-        ]
-        return json.dumps(ids, ensure_ascii=False)
+        return json.dumps(vault_fs.list_notes(_vault(db)), ensure_ascii=False)
     except Exception as e:
         return f"Erro ao listar notas: {e}"
 
 
 def tool_create_note(path: str, content: str, db: str = None) -> str:
-    """Cria uma nova nota no vault. path ex: '00-inbox/minha-nota.md'"""
-    import hashlib, time
-    note_id = path.lower()
-    leaf_id = "h:" + hashlib.md5(f"{path}{time.time()}".encode()).hexdigest()[:13]
-    leaf = {"_id": leaf_id, "data": content, "type": "leaf"}
-    doc  = {
-        "_id":      note_id,
-        "children": [leaf_id],
-        "path":     path,
-        "ctime":    int(time.time() * 1000),
-        "mtime":    int(time.time() * 1000),
-        "size":     len(content.encode("utf-8")),
-        "type":     "plain",
-        "eden":     {},
-    }
+    """Cria (ou sobrescreve) uma nota no vault. path ex: '00-inbox/minha-nota.md'"""
+    v = _vault(db)
     try:
-        _couch("put", leaf_id, db=db, json=leaf)
-        _couch("put", note_id, db=db, json=doc)
-        return f"Nota '{path}' criada com sucesso."
+        nid = vault_fs.write_note(v, path, content)
+        return f"Nota '{nid}' criada com sucesso."
     except Exception as e:
         return f"Erro ao criar nota: {e}"
 
@@ -872,7 +575,7 @@ Responda APENAS com um JSON válido (sem texto antes ou depois):
 
 def _find_related_for_new_note(content: str, exclude_path: str, db: str = None, threshold: float = 0.72) -> list:
     """Busca notas semanticamente relacionadas para auto-linking no ingest."""
-    vault = db or COUCHDB_DB
+    vault = _vault(db)
     try:
         col = get_chroma().get_collection(_col_name(vault))
         embedding = list(get_embed_model().embed([content[:1000]]))[0].tolist()
@@ -912,7 +615,7 @@ def _graph_enrich_search(args: dict, db: str = None) -> str:
 def ingest(raw_text: str, source_name: str, vault: Optional[str] = None, db: str = None) -> dict:
     """Converte texto bruto em nota Obsidian e salva no vault."""
     import datetime
-    db = db or vault  # vault name == CouchDB database name
+    db = db or vault  # vault name == subdiretório em disco
     note_ids = tool_list_notes(db=db)
     today = datetime.date.today().isoformat()
 
@@ -1034,8 +737,8 @@ def ingest_zip(content: bytes, vault: Optional[str] = None, db: str = None) -> d
 
 # ── Tool calling loop ─────────────────────────────────────────────────────────
 def tool_move_note(source_id: str, dest_id: str, db: str = None) -> str:
-    """Move/renomeia uma nota: copia conteúdo para o novo ID e marca o original como deleted."""
-    import time, hashlib
+    """Move/renomeia uma nota no disco. O watcher atualiza o índice automaticamente."""
+    v = _vault(db)
     source_id = source_id.lower().strip()
     dest_id   = dest_id.lower().strip()
     if source_id == dest_id:
@@ -1043,46 +746,32 @@ def tool_move_note(source_id: str, dest_id: str, db: str = None) -> str:
     if _is_settings_note(source_id):
         return f"Nota '{source_id}' é interna/protegida e não pode ser movida."
     try:
-        src_doc = _couch("get", source_id, db=db)
-        if src_doc.get("deleted"):
-            return f"Nota '{source_id}' já está deletada."
-        content = _read_note_content(src_doc, db=db)
-
-        leaf_id = "h:" + hashlib.md5(f"{dest_id}{time.time()}".encode()).hexdigest()[:13]
-        leaf = {"_id": leaf_id, "data": content, "type": "leaf"}
-        doc  = {
-            "_id":      dest_id,
-            "children": [leaf_id],
-            "path":     dest_id,
-            "ctime":    src_doc.get("ctime", int(time.time() * 1000)),
-            "mtime":    int(time.time() * 1000),
-            "size":     len(content.encode("utf-8")),
-            "type":     "plain",
-            "eden":     {},
-        }
-        _couch("put", leaf_id, db=db, json=leaf)
-        _couch("put", dest_id, db=db, json=doc)
-
-        src_doc["deleted"] = True
-        src_doc["mtime"]   = int(time.time() * 1000)
-        _couch("put", source_id, db=db, json=src_doc)
-
-        log.info(f"move_note: {source_id} → {dest_id}")
-        return f"Nota movida: '{source_id}' → '{dest_id}'"
+        if not vault_fs.exists(v, source_id):
+            return f"Nota '{source_id}' não existe."
+        nid = vault_fs.move_note(v, source_id, dest_id)
+        # Atualiza o índice imediatamente (watcher também pega, mas evitamos janela).
+        try:
+            indexer.remove_note(v, source_id if source_id.endswith(".md") else source_id + ".md")
+            indexer.index_note(v, nid, vault_fs.read_note(v, nid), force=True)
+        except Exception:
+            pass
+        log.info(f"move_note: {source_id} → {nid}")
+        return f"Nota movida: '{source_id}' → '{nid}'"
     except Exception as e:
         return f"Erro ao mover nota: {e}"
 
 
 def tool_delete_note(note_id: str, db: str = None) -> str:
-    """Marca uma nota como deleted=true no CouchDB (formato LiveSync)."""
-    import time
+    """Apaga uma nota do disco. O watcher remove do índice automaticamente."""
+    v = _vault(db)
     try:
-        doc = _couch("get", note_id, db=db)
-        if doc.get("deleted"):
-            return f"Nota '{note_id}' já estava deletada."
-        doc["deleted"] = True
-        doc["mtime"]   = int(time.time() * 1000)
-        _couch("put", note_id, db=db, json=doc)
+        if not vault_fs.delete_note(v, note_id):
+            return f"Nota '{note_id}' já não existia."
+        nid = note_id.lower() if note_id.endswith(".md") else note_id.lower() + ".md"
+        try:
+            indexer.remove_note(v, nid)
+        except Exception:
+            pass
         log.info(f"delete_note: {note_id}")
         return f"Nota '{note_id}' deletada."
     except Exception as e:
@@ -1091,9 +780,11 @@ def tool_delete_note(note_id: str, db: str = None) -> str:
 
 def tool_add_tags(note_id: str, tags: list, db: str = None) -> str:
     """Adiciona tags ao frontmatter YAML de uma nota. Cria o bloco --- se não existir. Não duplica tags já presentes."""
+    v = _vault(db)
     try:
-        doc = _couch("get", note_id, db=db)
-        content = _read_note_content(doc, db=db)
+        if not vault_fs.exists(v, note_id):
+            return f"Nota '{note_id}' não existe."
+        content = vault_fs.read_note(v, note_id)
 
         # Extrai frontmatter
         if content.startswith("---"):
@@ -1132,9 +823,7 @@ def tool_add_tags(note_id: str, tags: list, db: str = None) -> str:
             updated_fm = f"tags:\n{tags_yaml}\n"
 
         new_content = f"---\n{updated_fm}\n---\n{body}"
-        ok = _write_note_content(doc, new_content, db=db)
-        if not ok:
-            return f"Falha ao salvar tags em '{note_id}'."
+        vault_fs.write_note(v, note_id, new_content)
         log.info(f"add_tags: {note_id} +{new_tags}")
         return f"Tags adicionadas em '{note_id}': {new_tags}"
     except Exception as e:
@@ -1291,7 +980,7 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "vault": {"type": "string", "description": "Nome do vault (banco de dados CouchDB)"},
+                    "vault": {"type": "string", "description": "Nome do vault (subdiretório em disco)"},
                 },
                 "required": ["vault"],
             },
@@ -1499,9 +1188,9 @@ def generate_output(topic: str, template: str = "relatorio",
 def ask(question: str, collections: Optional[list] = None, vault: Optional[str] = None,
         on_progress=None) -> dict:
     """Loop de tool calling via prompt até o agente chamar 'done'.
-    vault = nome do banco CouchDB a usar (se None, usa COUCHDB_DB do env)."""
+    vault = nome do subdiretório em disco (se None, usa o vault padrão)."""
 
-    db = vault  # vault name == CouchDB database name
+    db = vault  # vault name == subdiretório em disco
 
     # Carrega settings do vault e injeta no system prompt
     settings_ctx = ""
@@ -1517,7 +1206,7 @@ def ask(question: str, collections: Optional[list] = None, vault: Optional[str] 
 
     vault_ctx = (
         f"\n\nVAULT ATIVO: '{vault}'\n"
-        f"- Você está trabalhando no vault '{vault}' (banco de dados CouchDB separado)\n"
+        f"- Você está trabalhando no vault '{vault}' (subdiretório em disco separado)\n"
         f"- As notas de configuração estão em '00-meta/config/'\n"
         f"- list_notes e search_vault já operam sobre este vault\n"
     ) if vault else ""
@@ -1740,32 +1429,14 @@ def normalize_tags(vault: Optional[str] = None) -> dict:
     Se vault=None, processa todos os vaults disponíveis."""
     vaults = [vault] if vault else get_vaults()
     if not vaults:
-        return {"answer": "Nenhum vault encontrado no CouchDB.", "sources": []}
+        return {"answer": "Nenhum vault encontrado em disco.", "sources": []}
 
     all_updated, all_errors = [], []
 
     for _db in vaults:
-        try:
-            r = requests.get(
-                f"{COUCHDB_URL}/{_db}/_all_docs",
-                params={"include_docs": True},
-                auth=COUCHDB_AUTH, timeout=30,
-            )
-            r.raise_for_status()
-        except Exception as e:
-            all_errors.append(f"[{_db}] erro ao listar: {e}")
-            continue
-
-        rows = r.json().get("rows", [])
-        for row in rows:
-            doc = row.get("doc", {})
-            nid = row["id"]
-            if (nid.startswith("_") or nid.startswith("h:")
-                    or doc.get("deleted") or _is_settings_note(nid)):
-                continue
-
+        for nid in vault_fs.list_notes(_db):
             try:
-                content = _read_note_content(doc, db=_db)
+                content = vault_fs.read_note(_db, nid)
             except Exception as e:
                 all_errors.append(f"[{_db}] {nid}: {e}")
                 continue
@@ -1790,12 +1461,9 @@ def normalize_tags(vault: Optional[str] = None) -> dict:
                 continue
 
             try:
-                ok = _write_note_content(doc, new_content, db=_db)
-                if ok:
-                    all_updated.append(f"{_db}/{nid}")
-                    log.info(f"normalize_tags: [{_db}] {nid}")
-                else:
-                    all_errors.append(f"[{_db}] {nid}: falha ao salvar")
+                vault_fs.write_note(_db, nid, new_content)
+                all_updated.append(f"{_db}/{nid}")
+                log.info(f"normalize_tags: [{_db}] {nid}")
             except Exception as e:
                 all_errors.append(f"[{_db}] {nid}: {e}")
 
@@ -1839,7 +1507,7 @@ def vault_review(vault: Optional[str] = None) -> dict:
     if not all_note_ids:
         return {"answer": "Vault vazio.", "sources": []}
 
-    vault_name = vault or COUCHDB_DB
+    vault_name = _vault(vault)
     chroma     = get_chroma()
 
     try:

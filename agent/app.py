@@ -9,7 +9,8 @@ import logging
 import threading
 from flask import Flask, request, jsonify, render_template_string, Response, stream_with_context
 from flask_cors import CORS
-from agent import ask, weekly_summary, summarize_meeting, vault_review, normalize_tags, repair_vault, purge_vault, purge_orphan_leaves, ingest_file, ingest_url, ingest_zip, get_vaults, stop_agent, reset_stop, tool_read_note, reindex_vault, generate_output, COUCHDB_URL, COUCHDB_DB, COUCHDB_AUTH
+from agent import ask, weekly_summary, summarize_meeting, vault_review, normalize_tags, purge_vault, ingest_file, ingest_url, ingest_zip, get_vaults, stop_agent, reset_stop, tool_read_note, reindex_vault, generate_output
+from core import vault_fs
 
 logging.basicConfig(
     level=logging.INFO,
@@ -631,35 +632,15 @@ def api_vaults():
 
 @app.route("/api/vault-stats", methods=["GET"])
 def api_vault_stats():
-    """Diagnóstico: contagem de docs por tipo e lista de raízes."""
-    import requests as req
-    from agent import COUCHDB_URL, COUCHDB_DB, COUCHDB_AUTH
+    """Diagnóstico: contagem de notas no disco por vault."""
+    vault = request.args.get("vault") or None
     try:
-        r = req.get(f"{COUCHDB_URL}/{COUCHDB_DB}/_all_docs",
-                    params={"include_docs": True}, auth=COUCHDB_AUTH, timeout=30)
-        r.raise_for_status()
-        rows = r.json().get("rows", [])
-        active, deleted, leaves, system = [], [], [], []
-        for row in rows:
-            nid = row["id"]
-            doc = row.get("doc", {})
-            if nid.startswith("_"):
-                system.append(nid)
-            elif nid.startswith("h:"):
-                leaves.append(nid)
-            elif doc.get("deleted"):
-                deleted.append(nid)
-            else:
-                active.append(nid)
-        return jsonify({
-            "total_docs": len(rows),
-            "active_notes": len(active),
-            "deleted_notes": len(deleted),
-            "leaf_docs": len(leaves),
-            "system_docs": len(system),
-            "active_note_ids": sorted(active),
-            "deleted_note_ids": sorted(deleted),
-        })
+        vaults = [vault] if vault else vault_fs.get_vaults()
+        out = {}
+        for v in vaults:
+            ids = vault_fs.list_notes(v)
+            out[v] = {"active_notes": len(ids), "active_note_ids": ids}
+        return jsonify(out)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -880,21 +861,12 @@ def api_weekly():
 
 
 
-@app.route("/api/repair", methods=["POST"])
-def api_repair():
-    return jsonify(repair_vault())
-
-
 @app.route("/api/purge", methods=["POST"])
 def api_purge():
     data        = request.get_json(silent=True) or {}
     keep_prefix = data.get("keep_prefix") or None
-    return jsonify(purge_vault(keep_prefix=keep_prefix))
-
-
-@app.route("/api/purge-leaves", methods=["POST"])
-def api_purge_leaves():
-    return jsonify(purge_orphan_leaves())
+    vault       = data.get("vault") or None
+    return jsonify(purge_vault(keep_prefix=keep_prefix, db=vault))
 
 
 @app.route("/api/meeting", methods=["POST"])
@@ -934,23 +906,12 @@ def api_upload_url():
 
 @app.route("/api/notes/tree")
 def api_notes_tree():
-    """Retorna a árvore de arquivos do vault como JSON."""
-    import requests as _req
+    """Retorna a árvore de arquivos do vault como JSON (lida do disco)."""
     vault = request.args.get("vault") or None
-    _db = vault or COUCHDB_DB
     try:
-        r = _req.get(
-            f"{COUCHDB_URL}/{_db}/_all_docs",
-            params={"include_docs": True},
-            auth=COUCHDB_AUTH, timeout=30,
+        note_ids = vault_fs.list_notes(vault) if vault else (
+            vault_fs.list_notes(vault_fs.get_vaults()[0]) if vault_fs.get_vaults() else []
         )
-        r.raise_for_status()
-        note_ids = [
-            row["id"] for row in r.json().get("rows", [])
-            if not row["id"].startswith("_")
-            and not row["id"].startswith("h:")
-            and not row.get("doc", {}).get("deleted")
-        ]
 
         def _build(node, path=""):
             items = []
@@ -1003,4 +964,4 @@ def health():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080, debug=False)
+    app.run(host="0.0.0.0", port=int(os.environ.get("AGENT_PORT", 8090)), debug=False)

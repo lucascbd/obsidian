@@ -1,16 +1,23 @@
-"""
-watcher.py — Multi-vault: assiste TODOS os bancos CouchDB, indexa no ChromaDB.
-Uma coleção ChromaDB por vault. Frontmatter como metadata. Grafo de links em _local/.
+"""watcher.py — observa o vault em disco e mantém o ChromaDB sincronizado.
+
+Substitui o longpoll do CouchDB por watchdog (inotify). Deriva o vault do
+primeiro componente do caminho relativo a VAULT_ROOT. Debounce por arquivo
+(editores/ignis emitem vários eventos por save). Estado em SQLite.
 """
 
-import os
-import re
+import sys
 import time
 import logging
 import threading
-import requests
-import chromadb
-from fastembed import TextEmbedding
+from pathlib import Path
+
+sys.path.insert(0, "/app")  # core/ montado em /app/core
+
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+
+from core import state, vault_fs, indexer
+from core.config import VAULT_ROOT, IGNORE_DIRS, is_meta
 
 logging.basicConfig(
     level=logging.INFO,
@@ -19,409 +26,135 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-COUCHDB_URL  = os.environ["COUCHDB_URL"]
-COUCHDB_USER = os.environ["COUCHDB_USER"]
-COUCHDB_PASS = os.environ["COUCHDB_PASSWORD"]
-CHROMA_HOST  = os.environ.get("CHROMADB_HOST", "chromadb")
-CHROMA_PORT  = int(os.environ.get("CHROMADB_PORT", 8000))
-AUTH         = (COUCHDB_USER, COUCHDB_PASS)
-
-EMBEDDING_MODEL    = os.environ.get("EMBEDDING_MODEL", "intfloat/multilingual-e5-large")
-SYSTEM_DBS         = {"_users", "_replicator", "_global_changes"}
-VAULT_POLL_SECS    = 60
-CHUNK_SIZE         = 400
-CHUNK_OVERLAP      = 50
-LINK_GRAPH_DOC     = "_local/link-graph"
-
-_INVALID_COL  = re.compile(r"[^a-zA-Z0-9_-]")
-_vault_threads: dict[str, threading.Thread] = {}
-_model_lock   = threading.Lock()
+DEBOUNCE_SECS = 1.5
+VAULT_RESCAN_SECS = 60
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _col_name(vault: str) -> str:
-    """Uma coleção ChromaDB por vault (nome sanitizado)."""
-    col = _INVALID_COL.sub("_", vault)[:63]
-    return col or "vault"
-
-
-def _is_settings(note_id: str) -> bool:
-    return "00-meta" in note_id.split("/")
-
-
-def chunk_by_sections(content: str, max_words: int = 350) -> list[str]:
-    """Chunking por seções Markdown, preservando contexto hierárquico.
-    Cada chunk: frontmatter + breadcrumb de headings pais + conteúdo da seção."""
-    # Separa frontmatter
-    fm = ""
-    body = content
-    if content.startswith("---"):
-        end = content.find("\n---", 3)
-        if end != -1:
-            fm = content[:end + 4].strip()
-            body = content[end + 4:].strip()
-
-    segments = re.split(r'(?m)(?=^#{1,3} )', body)
-    chunks = []
-    h_stack: list[str] = []
-
-    for seg in segments:
-        seg = seg.strip()
-        if not seg:
-            continue
-        first_line = seg.split('\n')[0]
-        hm = re.match(r'^(#{1,3}) (.+)', first_line)
-        if hm:
-            level = len(hm.group(1))
-            h_stack = h_stack[:level - 1]
-            h_stack.append(hm.group(2).strip())
-
-        ctx_parts = []
-        if fm:
-            ctx_parts.append(fm)
-        if len(h_stack) > 1:
-            ctx_parts.append("Contexto: " + " › ".join(h_stack[:-1]))
-        ctx = "\n\n".join(ctx_parts)
-        full_seg = (ctx + "\n\n" + seg).strip() if ctx else seg
-
-        words = full_seg.split()
-        if len(words) <= max_words:
-            if full_seg:
-                chunks.append(full_seg)
-        else:
-            heading_line = seg.split('\n')[0]
-            body_words = '\n'.join(seg.split('\n')[1:]).split()
-            step = max(50, max_words - len((ctx + "\n\n" + heading_line).split()) - 30)
-            for i in range(0, max(1, len(body_words)), step):
-                sub = " ".join(body_words[i:i + step])
-                sub_chunk = ((ctx + "\n\n" + heading_line + "\n" + sub) if ctx else (heading_line + "\n" + sub)).strip()
-                if sub_chunk:
-                    chunks.append(sub_chunk)
-
-    if not chunks:
-        # fallback: chunking por palavras
-        words = content.split()
-        size, overlap = 400, 50
-        i = 0
-        while i < len(words):
-            chunks.append(" ".join(words[i:i + size]))
-            i += size - overlap
-
-    return [c for c in chunks if c.strip()]
-
-
-def parse_frontmatter(content: str) -> dict:
-    """Extrai campos YAML do frontmatter para usar como metadata ChromaDB."""
-    meta: dict[str, str] = {}
-    if not content.startswith("---"):
-        return meta
-    end = content.find("\n---", 3)
-    if end == -1:
-        return meta
-    fm = content[3:end]
-    for key, pat in [("title", r"^title:\s*(.+)$"),
-                     ("date",  r"^date:\s*(.+)$"),
-                     ("source", r"^source:\s*(.+)$")]:
-        m = re.search(pat, fm, re.MULTILINE)
-        if m:
-            meta[key] = m.group(1).strip().strip("\"'")
-    # tags — lista YAML ou inline
-    m = re.search(r"^tags:(.*?)(?=\n\S|\Z)", fm, re.MULTILINE | re.DOTALL)
-    if m:
-        block = m.group(1)
-        tags = re.findall(r"[\-\*]\s*(\S+)", block)
-        if not tags:
-            tags = [t.strip().strip("\"'") for t in block.strip().strip("[]").split(",") if t.strip()]
-        if tags:
-            meta["tags"] = ",".join(tags[:10])
-    # Extração de entidades
-    for entity_key in ("people", "companies", "projects", "related"):
-        m = re.search(rf"^{entity_key}:(.*?)(?=\n\S|\Z)", fm, re.MULTILINE | re.DOTALL)
-        if m:
-            block = m.group(1)
-            items = re.findall(r"[\-\*]\s*(.+)", block)
-            if not items:
-                items = [t.strip().strip("\"'") for t in block.strip().strip("[]").split(",") if t.strip()]
-            if items:
-                meta[entity_key] = ",".join(i.strip() for i in items[:20])
-    return meta
-
-
-def extract_wiki_links(content: str) -> list[str]:
-    """Extrai note_ids de wiki links [[caminho/nota|alias]] ou [[caminho/nota]]."""
-    raw = re.findall(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]", content)
-    seen, links = set(), []
-    for r in raw:
-        r = r.strip()
-        if not r or r.startswith("http"):
-            continue
-        if not r.endswith(".md"):
-            r += ".md"
-        r = r.lower()
-        if r not in seen:
-            seen.add(r)
-            links.append(r)
-    return links
-
-
-def _read_livesync_content(doc: dict, vault: str) -> str:
-    """Lê conteúdo real da nota no formato LiveSync (parent + leaf docs)."""
-    children = doc.get("children", [])
-    if children:
-        parts = []
-        for leaf_id in children:
-            try:
-                r = requests.get(
-                    f"{COUCHDB_URL}/{vault}/{requests.utils.quote(leaf_id, safe='')}",
-                    auth=AUTH, timeout=10,
-                )
-                if r.status_code == 200:
-                    parts.append(r.json().get("data", ""))
-            except Exception:
-                pass
-        return "".join(parts)
-    return doc.get("content", "") or doc.get("data", "")
-
-
-# ── Grafo de links (_local não replica via LiveSync) ──────────────────────────
-
-def _read_link_graph(vault: str) -> dict:
+def _vault_and_note(path: str):
+    """(vault, note_id) de um caminho absoluto, ou (None, None) se fora de escopo."""
     try:
-        r = requests.get(f"{COUCHDB_URL}/{vault}/{LINK_GRAPH_DOC}", auth=AUTH, timeout=10)
-        if r.status_code == 200:
-            return r.json()
+        rel = Path(path).resolve().relative_to(VAULT_ROOT.resolve())
     except Exception:
-        pass
-    return {"_id": LINK_GRAPH_DOC, "links": {}}
+        return None, None
+    parts = rel.parts
+    if len(parts) < 2 or not parts[-1].endswith(".md"):
+        return None, None
+    if set(parts[1:]) & IGNORE_DIRS:
+        return None, None
+    vault = parts[0]
+    note_id = Path(*parts[1:]).as_posix().lower()
+    if is_meta(note_id):
+        return None, None
+    return vault, note_id
 
 
-def _write_link_graph(vault: str, doc: dict):
-    r = requests.put(f"{COUCHDB_URL}/{vault}/{LINK_GRAPH_DOC}", json=doc, auth=AUTH, timeout=10)
-    if r.status_code == 409:
-        raise requests.HTTPError(response=r)
-    # outros erros: loga mas não levanta
+class VaultHandler(FileSystemEventHandler):
+    """Agenda (re)indexação/remoção com debounce por arquivo."""
 
+    def __init__(self):
+        self._pending: dict[str, float] = {}   # path → horário-alvo
+        self._deleted: set[str] = set()
+        self._lock = threading.Lock()
 
-def update_link_graph(vault: str, note_id: str, links: list[str], deleted: bool = False):
-    for attempt in range(5):
-        try:
-            doc = _read_link_graph(vault)
-            link_map: dict = doc.get("links", {})
-            if deleted or not links:
-                link_map.pop(note_id, None)
+    def _schedule(self, path: str, deleted: bool = False):
+        with self._lock:
+            self._pending[path] = time.time() + DEBOUNCE_SECS
+            if deleted:
+                self._deleted.add(path)
             else:
-                link_map[note_id] = links
-            doc["links"] = link_map
-            _write_link_graph(vault, doc)
-            return
-        except requests.HTTPError as e:
-            if getattr(e.response, 'status_code', None) == 409 and attempt < 4:
-                time.sleep(0.1 * (2 ** attempt))
+                self._deleted.discard(path)
+
+    def on_created(self, e):
+        if not e.is_directory:
+            self._schedule(e.src_path)
+
+    def on_modified(self, e):
+        if not e.is_directory:
+            self._schedule(e.src_path)
+
+    def on_deleted(self, e):
+        if not e.is_directory:
+            self._schedule(e.src_path, deleted=True)
+
+    def on_moved(self, e):
+        if not e.is_directory:
+            self._schedule(e.src_path, deleted=True)
+            self._schedule(e.dest_path)
+
+    def process_due(self):
+        now = time.time()
+        with self._lock:
+            due = [p for p, t in self._pending.items() if t <= now]
+            for p in due:
+                del self._pending[p]
+            deleted = {p for p in due if p in self._deleted}
+            self._deleted -= deleted
+
+        for path in due:
+            vault, note_id = _vault_and_note(path)
+            if not vault:
                 continue
-            log.warning(f"[{vault}] link-graph write falhou após {attempt+1} tentativas: {e}")
-            return
-        except Exception as e:
-            log.warning(f"[{vault}] link-graph update erro: {e}")
-            return
-
-
-# ── Indexação ─────────────────────────────────────────────────────────────────
-
-def index_note(doc: dict, vault: str, col, model: TextEmbedding):
-    note_id = doc.get("_id", "")
-
-    # Filtra internos, leaves, settings, deletados
-    if (not note_id or note_id.startswith("_") or note_id.startswith("h:")
-            or doc.get("deleted") or _is_settings(note_id)):
-        return
-
-    content = _read_livesync_content(doc, vault)
-    if not content or not content.strip():
-        return
-
-    fm    = parse_frontmatter(content)
-    links = extract_wiki_links(content)
-
-    update_link_graph(vault, note_id, links)
-
-    # Remove chunks antigos desta nota (upsert)
-    try:
-        col.delete(where={"note_id": note_id})
-    except Exception:
-        pass
-
-    chunks = chunk_by_sections(content)
-    if not chunks:
-        return
-
-    with _model_lock:
-        embeddings = [e.tolist() for e in model.embed(chunks)]
-
-    base_meta = {"note_id": note_id, "vault": vault, **fm}
-    col.add(
-        documents  = chunks,
-        embeddings = embeddings,
-        ids        = [f"{vault}__{note_id}__c{i}" for i in range(len(chunks))],
-        metadatas  = [{**base_meta, "chunk": i} for i in range(len(chunks))],
-    )
-    log.info(f"[{vault}] {note_id} — {len(chunks)} chunk(s), {len(links)} link(s)")
-
-
-def delete_note_from_index(note_id: str, vault: str, chroma: chromadb.HttpClient):
-    if not note_id or note_id.startswith("_") or note_id.startswith("h:"):
-        return
-    try:
-        chroma.get_or_create_collection(_col_name(vault)).delete(where={"note_id": note_id})
-        log.info(f"[{vault}] Removido {note_id}")
-    except Exception:
-        pass
-    update_link_graph(vault, note_id, [], deleted=True)
-
-
-# ── Reindexação e watch por vault ─────────────────────────────────────────────
-
-def full_reindex(vault: str, chroma: chromadb.HttpClient, model: TextEmbedding):
-    log.info(f"[{vault}] Reindexação completa...")
-
-    # Limpa coleção antiga (dimensões podem ter mudado com novo modelo)
-    try:
-        chroma.delete_collection(_col_name(vault))
-        log.info(f"[{vault}] Coleção anterior removida")
-    except Exception:
-        pass
-
-    # Cria coleção fresca uma única vez
-    col = chroma.get_or_create_collection(_col_name(vault))
-
-    # Reseta grafo de links
-    _write_link_graph(vault, {"_id": LINK_GRAPH_DOC, "links": {}})
-
-    skip, limit, total = 0, 100, 0
-    while True:
-        try:
-            r = requests.get(
-                f"{COUCHDB_URL}/{vault}/_all_docs",
-                params={"include_docs": True, "limit": limit, "skip": skip},
-                auth=AUTH, timeout=30,
-            )
-            rows = r.json().get("rows", [])
-        except Exception as e:
-            log.error(f"[{vault}] _all_docs erro: {e}")
-            break
-        if not rows:
-            break
-        for row in rows:
-            index_note(row.get("doc", {}), vault, col, model)
-            total += 1
-        skip += limit
-    log.info(f"[{vault}] Reindexação: {total} docs processados")
-
-
-def watch_vault(vault: str, chroma: chromadb.HttpClient, model: TextEmbedding):
-    log.info(f"[{vault}] Watch iniciado")
-    col      = chroma.get_or_create_collection(_col_name(vault))
-    last_seq = "0"
-    while True:
-        try:
-            r = requests.get(
-                f"{COUCHDB_URL}/{vault}/_changes",
-                params={
-                    "since":        last_seq,
-                    "include_docs": True,
-                    "feed":         "longpoll",
-                    "timeout":      30000,
-                },
-                auth=AUTH, timeout=40,
-            )
-            data = r.json()
-            for change in data.get("results", []):
-                doc = change.get("doc", {})
-                if change.get("deleted"):
-                    delete_note_from_index(doc.get("_id", ""), vault, chroma)
+            try:
+                if path in deleted or not Path(path).is_file():
+                    indexer.remove_note(vault, note_id)
                 else:
-                    index_note(doc, vault, col, model)
-            last_seq = data.get("last_seq", last_seq)
-        except requests.exceptions.Timeout:
-            pass  # normal no longpoll
-        except Exception as e:
-            log.error(f"[{vault}] Watch erro: {e} — retentando em 5s")
-            time.sleep(5)
+                    content = vault_fs.read_path(Path(path))
+                    indexer.index_note(vault, note_id, content)
+            except Exception as ex:
+                log.error(f"[{vault}] erro ao processar {note_id}: {ex}")
 
 
-# ── Descoberta dinâmica de vaults ─────────────────────────────────────────────
-
-def get_active_vaults() -> list[str]:
-    try:
-        r = requests.get(f"{COUCHDB_URL}/_all_dbs", auth=AUTH, timeout=10)
-        return [v for v in r.json() if v not in SYSTEM_DBS]
-    except Exception as e:
-        log.warning(f"_all_dbs erro: {e}")
-        return []
-
-
-def ensure_vault_watched(vault: str, chroma: chromadb.HttpClient, model: TextEmbedding):
-    t = _vault_threads.get(vault)
-    if t and t.is_alive():
-        return
-
-    # Verifica se a coleção já existe (pode ter sido criada pelo agent/reindex externo)
-    col_nm = _col_name(vault)
-    col_exists = False
-    try:
-        chroma.get_collection(col_nm)
-        col_exists = True
-    except Exception:
-        pass
-
-    if col_exists:
-        log.info(f"[{vault}] Coleção já existe — pulando full_reindex, iniciando watch")
-    else:
-        log.info(f"[{vault}] Novo vault — iniciando reindexação e watch")
-        full_reindex(vault, chroma, model)
-
-    t = threading.Thread(target=watch_vault, args=(vault, chroma, model), daemon=True, name=f"watch-{vault}")
-    t.start()
-    _vault_threads[vault] = t
-
-
-# ── Startup ───────────────────────────────────────────────────────────────────
-
-def wait_for_services():
-    log.info("Aguardando CouchDB...")
-    while True:
-        try:
-            if requests.get(f"{COUCHDB_URL}/", auth=AUTH, timeout=5).status_code == 200:
-                log.info("CouchDB OK")
-                break
-        except Exception:
-            pass
-        time.sleep(3)
-
+def wait_for_chroma():
+    import requests
+    from core.config import CHROMA_HOST, CHROMA_PORT
     log.info("Aguardando ChromaDB...")
     while True:
-        try:
-            for path in ("/api/v2/heartbeat", "/api/v1/heartbeat"):
-                try:
-                    if requests.get(f"http://{CHROMA_HOST}:{CHROMA_PORT}{path}", timeout=5).status_code == 200:
-                        log.info("ChromaDB OK")
-                        return
-                except Exception:
-                    continue
-        except Exception:
-            pass
+        for path in ("/api/v2/heartbeat", "/api/v1/heartbeat"):
+            try:
+                if requests.get(f"http://{CHROMA_HOST}:{CHROMA_PORT}{path}", timeout=5).status_code == 200:
+                    log.info("ChromaDB OK")
+                    return
+            except Exception:
+                pass
         time.sleep(3)
+
+
+def initial_scan():
+    """Reconcilia cada vault no disco com o índice (pula o que não mudou)."""
+    for vault in vault_fs.get_vaults():
+        try:
+            indexer.reconcile(vault)
+        except Exception as e:
+            log.error(f"[{vault}] erro no scan inicial: {e}")
+
+
+def main():
+    VAULT_ROOT.mkdir(parents=True, exist_ok=True)
+    state.init_db()
+    wait_for_chroma()
+
+    log.info(f"Scan inicial em {VAULT_ROOT}")
+    initial_scan()
+
+    handler = VaultHandler()
+    observer = Observer()
+    observer.schedule(handler, str(VAULT_ROOT), recursive=True)
+    observer.start()
+    log.info(f"Observando {VAULT_ROOT} (recursivo)")
+
+    last_rescan = time.time()
+    try:
+        while True:
+            handler.process_due()
+            # Rescan periódico: pega vaults novos e qualquer evento perdido.
+            if time.time() - last_rescan > VAULT_RESCAN_SECS:
+                initial_scan()
+                last_rescan = time.time()
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        observer.stop()
+    observer.join()
 
 
 if __name__ == "__main__":
-    wait_for_services()
-
-    log.info(f"Carregando modelo: {EMBEDDING_MODEL}")
-    model  = TextEmbedding(EMBEDDING_MODEL)
-    chroma = chromadb.HttpClient(host=CHROMA_HOST, port=CHROMA_PORT)
-
-    log.info("Modo multi-vault — polling a cada 60s para novos vaults")
-    while True:
-        for vault in get_active_vaults():
-            ensure_vault_watched(vault, chroma, model)
-        time.sleep(VAULT_POLL_SECS)
+    main()
