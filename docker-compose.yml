@@ -6,7 +6,7 @@ services:
     container_name: obsidian-ignis
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "${IGNIS_HOST_PORT:-8080}:8080"
     environment:
       OBSIDIAN_VERSION: ${OBSIDIAN_VERSION:-1.12.7}
       PUID: ${PUID:-1000}
@@ -71,7 +71,7 @@ services:
     container_name: obsidian-agent
     restart: unless-stopped
     ports:
-      - "8090:8090"
+      - "${AGENT_HOST_PORT:-8090}:8090"
     environment:
       VAULT_ROOT: /vaults
       DATA_DIR: /data
