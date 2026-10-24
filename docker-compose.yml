@@ -21,8 +21,10 @@ services:
     image: chromadb/chroma:latest
     container_name: obsidian-chromadb
     restart: unless-stopped
-    ports:
-      - "8000:8000"
+    # Sem porta no host: acessado só internamente via "chromadb:8000" (evita conflito
+    # na :8000). Para depurar de fora, descomente e escolha uma porta livre:
+    # ports:
+    #   - "8001:8000"
     volumes:
       - chromadb_data:/chroma/chroma
     environment:
