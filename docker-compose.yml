@@ -83,11 +83,10 @@ services:
       CHROMADB_PORT: 8000
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-intfloat/multilingual-e5-large}
       AGENT_PORT: 8090
-      # Fase 1 ainda usa OpenRouter como LLM (Fase 2 migra para o Claude Agent SDK).
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
-      OPENROUTER_MODEL: ${OPENROUTER_MODEL}
-      # Fase 2 (Claude Agent SDK):
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # LLM via Claude Agent SDK (assinatura Pro). Gere o token com `claude setup-token`.
+      # NÃO defina ANTHROPIC_API_KEY — ela tem precedência e ignoraria o token do Pro.
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-sonnet}
       FLASK_SECRET_KEY: ${FLASK_SECRET_KEY}
     volumes:
       - ./vaults:/vaults

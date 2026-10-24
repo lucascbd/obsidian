@@ -24,9 +24,8 @@ from core.text import (
 
 log = logging.getLogger(__name__)
 
-OPENROUTER_KEY   = os.environ["OPENROUTER_API_KEY"]
-OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "nousresearch/hermes-3-llama-3.1-70b")
-OPENROUTER_URL   = "https://openrouter.ai/api/v1/chat/completions"
+# LLM via Claude Agent SDK (Fase 2). Ver agent/sdk_llm.py.
+import sdk_llm
 
 # Vault padrão: primeiro subdiretório de VAULT_ROOT, ou o configurado.
 DEFAULT_VAULT = os.environ.get("DEFAULT_VAULT", "")
@@ -1083,30 +1082,57 @@ CONCLUSÃO:
 - No "done", liste cada nota movida/editada/criada/deletada com uma linha de descrição"""
 
 
+# ── System prompt para o Claude Agent SDK (Fase 2) ──────────────────────────────
+# O SDK chama ferramentas nativamente (sem formato JSON). Mantém persona e regras.
+SDK_SYSTEM_PROMPT = """Você é o Mordomo do Conhecimento — um agente que organiza, conecta e enriquece o vault Obsidian do usuário.
+
+MISSÃO:
+Transformar informações brutas em conhecimento navegável. Você decide a estrutura de pastas, cria notas, estabelece conexões e mantém o vault organizado e coerente. Antecipa necessidades e executa a tarefa até o fim, sem parar no meio.
+
+FERRAMENTAS (use as ferramentas disponíveis — não descreva chamadas em texto):
+- search_vault → descoberta semântica: "quais notas falam sobre X?" (retorna notas conectadas no grafo)
+- graph_search / get_neighbors → mapear clusters e conexões via wiki links
+- list_notes → ver caminhos/estrutura de pastas (NUNCA para ler conteúdo em loop)
+- read_note → ler o conteúdo de uma nota já identificada como relevante
+- create_note / edit_note / move_note / delete_note / add_tags → alterações no vault
+
+USO EFICIENTE — OBRIGATÓRIO:
+- NUNCA faça list_notes + read_note em loop para analisar o vault (é O(n) e lento).
+- Use várias chamadas search_vault com queries temáticas para descobrir clusters.
+- Use read_note só para notas específicas já identificadas como relevantes.
+
+ESTRUTURA DE PASTAS — LIVRE:
+- Crie pastas/subpastas que façam sentido; prefira hierarquias semânticas ("projetos/nome/").
+- Slugs em lowercase com hifens, sem acentos.
+
+RESPEITO À INTENÇÃO DO USUÁRIO — CRÍTICO:
+- Se o usuário disser "só analise", "não mova ainda", "mostre primeiro", "me pergunte antes" → responda com a PROPOSTA em texto e NÃO use create_note/edit_note/move_note/delete_note.
+- Se disser "faça", "execute", "aplique" → execute sem pedir confirmação.
+- Em dúvida, trate como "só análise" e apresente a proposta.
+
+EXECUÇÃO:
+- Execute a tarefa COMPLETA. Se há 50 notas para processar, processe as 50.
+- Ao reorganizar: use move_note (não criar+deletar). Ao padronizar tags: use add_tags.
+- Nunca mova uma nota para o caminho onde ela já está; se o source não existe, já foi movida — pule.
+
+KNOWLEDGE GRAPH:
+- Wiki links SEMPRE com alias: [[caminho/nota|Nome Visível]]. Preserve o frontmatter YAML ao editar.
+- Frontmatter mínimo: title, date, tags.
+
+RESPOSTA FINAL:
+- Ao terminar, escreva um resumo em texto listando cada nota criada/editada/movida/deletada com uma linha de descrição. Não peça para continuar — conclua."""
+
+
 def _call_llm_raw(messages: list) -> str:
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_KEY}",
-        "Content-Type":  "application/json",
-        "HTTP-Referer":  "https://obsidian-agent.local",
-        "X-Title":       "Obsidian MI Agent",
-    }
-    payload = {
-        "model":       OPENROUTER_MODEL,
-        "messages":    messages,
-        "temperature": 0.2,
-    }
-    r = requests.post(OPENROUTER_URL, json=payload, headers=headers, timeout=120)
-    if not r.ok:
-        log.error(f"OpenRouter error {r.status_code}: {r.text}")
-    r.raise_for_status()
-    msg = r.json()["choices"][0]["message"]
-    content = msg.get("content") or ""
-    # Alguns modelos retornam content=null com tool_calls — extrai o JSON do tool call
-    if not content and msg.get("tool_calls"):
-        tc = msg["tool_calls"][0]
-        fn = tc.get("function", {})
-        content = json.dumps({"tool": fn.get("name"), "args": json.loads(fn.get("arguments", "{}"))})
-    return content.strip()
+    """Chamada única ao LLM (Claude Agent SDK, sem ferramentas). Converte o formato
+    de mensagens (system + user/assistant) em system+user para o complete do SDK."""
+    system = "\n\n".join(m["content"] for m in messages if m.get("role") == "system")
+    rest   = [m for m in messages if m.get("role") != "system"]
+    user   = "\n\n".join(
+        (m["content"] if m.get("role") == "user" else f"[assistente anterior]\n{m['content']}")
+        for m in rest
+    )
+    return sdk_llm.complete(system, user).strip()
 
 
 GENERATE_TEMPLATES = {
@@ -1190,150 +1216,41 @@ def ask(question: str, collections: Optional[list] = None, vault: Optional[str] 
     """Loop de tool calling via prompt até o agente chamar 'done'.
     vault = nome do subdiretório em disco (se None, usa o vault padrão)."""
 
-    db = vault  # vault name == subdiretório em disco
+    db = _vault(vault)
 
     # Carrega settings do vault e injeta no system prompt
     settings_ctx = ""
-    if vault:
-        settings = load_settings(vault, db=db)
-        parts = []
-        if settings.get("profile"):
-            parts.append(f"## PERFIL DO AGENTE (do vault)\n{settings['profile']}")
-        if settings.get("mem"):
-            parts.append(f"## MEMÓRIA DE SESSÕES ANTERIORES\n{settings['mem'][-3000:]}")
-        if parts:
-            settings_ctx = "\n\n" + "\n\n".join(parts)
+    settings = load_settings(db, db=db)
+    parts = []
+    if settings.get("profile"):
+        parts.append(f"## PERFIL DO AGENTE (do vault)\n{settings['profile']}")
+    if settings.get("mem"):
+        parts.append(f"## MEMÓRIA DE SESSÕES ANTERIORES\n{settings['mem'][-3000:]}")
+    if parts:
+        settings_ctx = "\n\n" + "\n\n".join(parts)
 
     vault_ctx = (
-        f"\n\nVAULT ATIVO: '{vault}'\n"
-        f"- Você está trabalhando no vault '{vault}' (subdiretório em disco separado)\n"
-        f"- As notas de configuração estão em '00-meta/config/'\n"
-        f"- list_notes e search_vault já operam sobre este vault\n"
-    ) if vault else ""
+        f"\n\nVAULT ATIVO: '{db}'\n"
+        f"- Você trabalha no vault '{db}' (subdiretório em disco).\n"
+        f"- As notas de configuração estão em '00-meta/config/'.\n"
+        f"- list_notes e search_vault já operam sobre este vault.\n"
+    )
 
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT + settings_ctx + vault_ctx},
-        {"role": "user",   "content": question},
-    ]
-    sources = []
-
-    # Ferramentas com db vinculado ao vault escolhido
-    scoped_fns = {
-        "search_vault":    lambda args: _graph_enrich_search(args, db=db),
-        "get_neighbors":   lambda args: tool_get_neighbors(db=db, **args),
-        "graph_search":    lambda args: tool_graph_search(db=db, **args),
-        "read_note":       lambda args: tool_read_note(db=db, **args),
-        "list_notes":      lambda _: tool_list_notes(db=db),
-        "edit_note":       lambda args: tool_edit_note(db=db, **args),
-        "create_note":     lambda args: tool_create_note(db=db, **args),
-        "move_note":       lambda args: tool_move_note(db=db, **args),
-        "delete_note":     lambda args: tool_delete_note(db=db, **args),
-        "add_tags":        lambda args: tool_add_tags(db=db, **args),
-        "ensure_settings": lambda args: tool_ensure_settings(args.get("vault") or vault or "", db=db),
-    }
+    system_prompt = SDK_SYSTEM_PROMPT + settings_ctx + vault_ctx
 
     reset_stop()
-    bad_format_streak = 0
-    rounds = 0
+    result = sdk_llm.run_agent(system_prompt, question, db, on_progress=on_progress)
+    answer  = result.get("answer", "Concluído.")
+    sources = result.get("sources", [])
 
-    while rounds < MAX_ROUNDS:
-        rounds += 1
-        raw = _call_llm_raw(messages)
-        messages.append({"role": "assistant", "content": raw})
-        log.info(f"LLM: {raw[:200]}")
+    # Salva memória da sessão
+    try:
+        actions_summary = _build_actions_summary(sources, [])
+        save_session_memory(db, question, answer, sources, actions_summary, db=db)
+    except Exception as e:
+        log.warning(f"Falha ao salvar memória de sessão: {e}")
 
-        call = None
-        clean = re.sub(r"```(?:json)?\n?(.*?)```", r"\1", raw, flags=re.DOTALL).strip()
-
-        try:
-            call = json.loads(clean)
-        except Exception:
-            for match in re.finditer(r'\{(?:[^{}]|\{[^{}]*\})*\}', clean, re.DOTALL):
-                try:
-                    candidate = json.loads(match.group())
-                    if "tool" in candidate:
-                        call = candidate
-                        break
-                except Exception:
-                    continue
-
-        if call is None:
-            bad_format_streak += 1
-            if bad_format_streak >= 5:
-                return {"answer": "Agente travou em loop de formato inválido após 5 tentativas consecutivas.", "sources": list(set(sources))}
-            messages.append({"role": "user", "content": "Responda APENAS com um JSON válido. Nenhum texto antes ou depois."})
-            continue
-
-        if _stop_event.is_set():
-            log.info("Agente parado pelo usuário")
-            return {"answer": "⛔ Operação interrompida pelo usuário.", "sources": list(set(sources))}
-
-        bad_format_streak = 0
-        tool = call.get("tool")
-        args = call.get("args", {})
-
-        if tool == "done":
-            answer = args.get("answer", "Concluído.")
-
-            # Auto-continue: verifica se há trabalho pendente mencionado na resposta
-            if _PENDING_RE.search(answer):
-                log.info("Auto-continue: trabalho pendente detectado, continuando loop.")
-                messages.append({
-                    "role": "user",
-                    "content": "Continue a tarefa. Execute TUDO que está pendente antes de chamar done."
-                })
-                continue
-
-            # Salva memória da sessão
-            if vault:
-                try:
-                    actions_summary = _build_actions_summary(sources, messages)
-                    save_session_memory(vault, question, answer, list(set(sources)), actions_summary, db=db)
-                except Exception as e:
-                    log.warning(f"Falha ao salvar memória de sessão: {e}")
-
-            return {"answer": answer, "sources": list(set(sources))}
-
-        if tool not in scoped_fns:
-            messages.append({"role": "user", "content": f"Ferramenta '{tool}' não existe. Use: search_vault, read_note, list_notes, edit_note, create_note, done."})
-            continue
-
-        result = scoped_fns[tool](args)
-        log.info(f"Tool {tool} result: {str(result)[:200]}")
-
-        # Notifica progresso via callback
-        if on_progress is not None:
-            try:
-                result_str = str(result)
-                args_resumido = {k: (v[:80] if isinstance(v, str) and len(v) > 80 else v)
-                                 for k, v in args.items()}
-                on_progress({
-                    "tool":           tool,
-                    "args":           args_resumido,
-                    "result_preview": result_str[:120],
-                })
-            except Exception as e:
-                log.warning(f"on_progress callback erro: {e}")
-
-        if tool in ("edit_note", "create_note", "add_tags", "ensure_settings"):
-            sources.append(args.get("note_id") or args.get("path") or args.get("vault", ""))
-        elif tool == "move_note":
-            sources.append(args.get("dest_id", ""))
-        elif tool == "delete_note":
-            sources.append(args.get("note_id", ""))
-
-        messages.append({"role": "user", "content": f"Resultado de {tool}:\n{result}"})
-
-    # MAX_ROUNDS atingido — salva memória parcial e retorna
-    log.warning(f"MAX_ROUNDS ({MAX_ROUNDS}) atingido. Salvando memória parcial.")
-    partial_answer = f"Tarefa interrompida após {MAX_ROUNDS} rounds. Trabalho parcial realizado em {len(set(sources))} nota(s)."
-    if vault:
-        try:
-            actions_summary = _build_actions_summary(sources, messages)
-            save_session_memory(vault, question, partial_answer, list(set(sources)), actions_summary, db=db)
-        except Exception as e:
-            log.warning(f"Falha ao salvar memória parcial: {e}")
-    return {"answer": partial_answer, "sources": list(set(sources))}
+    return {"answer": answer, "sources": sources}
 
 
 def _build_actions_summary(sources: list, messages: list) -> str:

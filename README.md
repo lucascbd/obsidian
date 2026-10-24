@@ -9,8 +9,21 @@ Assistente pessoal sobre um vault Obsidian em disco, com busca semântica local.
 - **SQLite** (`./data/state.db`) — estado de sincronização, IDs processados e grafo de links.
 - **watcher** — observa o vault via inotify (watchdog) e mantém o ChromaDB sincronizado.
 
-> Fase 1 usa o OpenRouter como LLM. Fase 2 migra o raciocínio para o **Claude Agent SDK**
-> (`ANTHROPIC_API_KEY`). Fase 3: ingestão de e-mail/Teams via Microsoft Graph.
+> **Python (agente)** raciocina via **Claude Agent SDK** autenticado pela assinatura
+> **Claude Pro** (`CLAUDE_CODE_OAUTH_TOKEN`). Fase 3: ingestão de e-mail/Teams via Microsoft Graph.
+
+## Token da assinatura Pro (uma vez)
+
+O agente usa sua assinatura Claude Pro via Claude Agent SDK. Gere o token numa máquina
+com navegador e o Claude Code instalado:
+
+```bash
+claude setup-token   # faz login na conta Pro e imprime o token (validade ~1 ano)
+```
+
+Cole o valor em `CLAUDE_CODE_OAUTH_TOKEN` nas variáveis da stack. **Não** defina
+`ANTHROPIC_API_KEY` — ela tem precedência e ignoraria o token do Pro. O uso conta
+contra os limites da assinatura.
 
 ## Deploy via Portainer (Git)
 
@@ -29,9 +42,9 @@ Assistente pessoal sobre um vault Obsidian em disco, com busca semântica local.
 | `OBSIDIAN_VERSION` | `1.12.7` |
 | `PUID` / `PGID` | `1000` / `1000` |
 | `DEFAULT_VAULT` | nome do subdiretório em `./vaults` (vazio = primeiro encontrado) |
-| `OPENROUTER_API_KEY` | sua chave do OpenRouter (Fase 1) |
-| `OPENROUTER_MODEL` | `nousresearch/hermes-3-llama-3.1-70b` |
-| `ANTHROPIC_API_KEY` | chave Anthropic (Fase 2) |
+| `CLAUDE_CODE_OAUTH_TOKEN` | token da assinatura Pro (`claude setup-token`) |
+| `ANTHROPIC_MODEL` | `sonnet` (ou `opus`/`haiku`) |
+| `IGNIS_HOST_PORT` / `AGENT_HOST_PORT` | portas no host (padrão 8080 / 8090) |
 | `FLASK_SECRET_KEY` | string aleatória |
 
 ### 3. Deploy the stack
