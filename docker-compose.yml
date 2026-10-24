@@ -42,6 +42,7 @@ services:
       context: .
       dockerfile: watcher/Dockerfile
     image: obsidian-watcher
+    pull_policy: build
     container_name: obsidian-watcher
     restart: unless-stopped
     environment:
@@ -64,6 +65,7 @@ services:
       context: .
       dockerfile: agent/Dockerfile
     image: obsidian-agent
+    pull_policy: build
     container_name: obsidian-agent
     restart: unless-stopped
     ports:
