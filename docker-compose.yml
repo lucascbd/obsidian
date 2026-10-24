@@ -18,7 +18,9 @@ services:
       - obsidian-net
 
   chromadb:
-    image: chromadb/chroma:latest
+    # Versão fixada = versão do cliente (chromadb==0.5.20) p/ garantir compat de API.
+    # (A tag :latest virou a nova imagem em Rust: persist em /data, sem python/curl.)
+    image: chromadb/chroma:0.5.20
     container_name: obsidian-chromadb
     restart: unless-stopped
     # Sem porta no host: acessado só internamente via "chromadb:8000" (evita conflito
