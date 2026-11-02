@@ -135,7 +135,9 @@ def _options(system_prompt: str, db, sources: list, on_progress):
         mcp_servers={_SERVER_NAME: server},
         allowed_tools=[f"mcp__{_SERVER_NAME}__*"],
         tools=[],                     # desliga as ferramentas nativas (só MCP do vault)
-        permission_mode="bypassPermissions",
+        # "default" + allowed_tools pré-aprova as tools do vault sem prompt.
+        # (bypassPermissions vira --dangerously-skip-permissions, que o CLI recusa como root.)
+        permission_mode="default",
         setting_sources=[],           # não lê settings/CLAUDE.md do filesystem
         max_turns=MAX_TURNS,
     )
@@ -175,7 +177,7 @@ def run_agent(system_prompt: str, question: str, db, on_progress=None) -> dict:
 async def _complete_async(system: str, user: str) -> str:
     from claude_agent_sdk import query, ClaudeAgentOptions, ResultMessage, AssistantMessage, TextBlock
     opts = ClaudeAgentOptions(system_prompt=system, tools=[], max_turns=1,
-                              model=MODEL, setting_sources=[], permission_mode="bypassPermissions")
+                              model=MODEL, setting_sources=[], permission_mode="default")
     out = ""
     async for msg in query(prompt=user, options=opts):
         if isinstance(msg, AssistantMessage):
