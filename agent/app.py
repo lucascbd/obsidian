@@ -11,6 +11,7 @@ from flask import Flask, request, jsonify, render_template_string, Response, str
 from flask_cors import CORS
 from agent import ask, weekly_summary, summarize_meeting, vault_review, normalize_tags, purge_vault, ingest_file, ingest_url, ingest_zip, get_vaults, stop_agent, reset_stop, tool_read_note, reindex_vault, generate_output
 from core import vault_fs
+from core import settings as app_settings
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,556 +30,180 @@ HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Obsidian Agent</title>
+<title>Mordomo do Conhecimento</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
-  :root {
-    --bg:#0f1117; --surface:#181c27; --surface2:#1e2335;
-    --border:#272d42; --accent:#4f7fff; --text:#e2e8f0;
-    --muted:#64748b; --label:#94a3b8;
+  :root{
+    --bg:#0f1117; --surface:#181c27; --surface2:#1e2335; --border:#272d42;
+    --accent:#4f7fff; --accent2:#7c5cff; --text:#e2e8f0; --muted:#64748b; --label:#94a3b8;
+    --green:#3ecf8e; --amber:#f5a623; --red:#ef4e6b;
   }
   *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);height:100vh;display:flex;flex-direction:column}
-  header{border-bottom:1px solid var(--border);padding:14px 20px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+  body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);height:100vh;display:flex;flex-direction:column;overflow:hidden}
+  header{border-bottom:1px solid var(--border);padding:12px 20px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+  header .brand{display:flex;align-items:center;gap:10px}
   header h1{font-size:15px;font-weight:600}
-  .scope-wrap{display:flex;align-items:center;gap:8px}
-  .scope-wrap label{font-size:11px;color:var(--muted);font-family:'JetBrains Mono',monospace}
-  #root-select{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:6px 10px;font-size:12px;color:var(--label);font-family:'Inter',sans-serif;outline:none;min-width:140px}
-  #root-select:focus{border-color:var(--accent)}
+  .vault-badge{font-size:11px;color:var(--label);background:var(--surface2);border:1px solid var(--border);padding:3px 9px;border-radius:20px;font-family:'JetBrains Mono',monospace}
+  .gear{background:var(--surface);border:1px solid var(--border);color:var(--label);width:36px;height:36px;border-radius:9px;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center}
+  .gear:hover{background:var(--surface2);color:var(--text)}
   .layout{display:flex;flex:1;overflow:hidden}
-  .sidebar{width:210px;flex-shrink:0;border-right:1px solid var(--border);padding:14px 10px;display:flex;flex-direction:column;gap:4px;overflow-y:auto}
-  .s-label{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;padding:0 8px;margin:10px 0 4px}
-  .s-btn{background:transparent;border:none;color:var(--label);padding:8px 10px;border-radius:7px;font-size:13px;cursor:pointer;text-align:left;font-family:'Inter',sans-serif;width:100%;display:flex;align-items:center;gap:8px}
-  .s-btn:hover{background:var(--surface2);color:var(--text)}
-  .s-btn.active{background:var(--accent);color:#fff}
-  .main{flex:1;display:flex;flex-direction:column;overflow:hidden}
-  .chat{flex:1;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:14px}
-  .chat::-webkit-scrollbar{width:4px}
-  .chat::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
-  .empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;color:var(--muted);text-align:center;padding:40px}
-  .empty .icon{font-size:40px;margin-bottom:8px}
-  .empty h2{font-size:16px;color:var(--label)}
-  .empty p{font-size:13px;max-width:340px;line-height:1.6}
-  .msg{display:flex;flex-direction:column;gap:5px;max-width:800px}
-  .msg.user{align-self:flex-end;align-items:flex-end}
-  .msg.agent{align-self:flex-start}
-  .bubble{padding:11px 15px;border-radius:12px;font-size:14px;line-height:1.6;white-space:pre-wrap;word-break:break-word}
-  .msg.user .bubble{background:var(--accent);color:#fff;border-bottom-right-radius:4px}
-  .msg.agent .bubble{background:var(--surface);border:1px solid var(--border);border-bottom-left-radius:4px}
-  .msg-time{font-size:10px;color:var(--muted);font-family:'JetBrains Mono',monospace}
-  .msg.user .msg-time{text-align:right}
-  .sources{display:flex;gap:5px;flex-wrap:wrap}
-  .src-tag{font-size:10px;padding:2px 7px;border-radius:4px;background:var(--surface2);border:1px solid var(--border);color:var(--muted);font-family:'JetBrains Mono',monospace}
-  .typing-wrap{display:flex;align-items:center;gap:8px;padding:11px 15px;background:var(--surface);border:1px solid var(--border);border-radius:12px;border-bottom-left-radius:4px;width:fit-content}
-  .typing-wrap span{width:6px;height:6px;border-radius:50%;background:var(--muted);animation:bounce 1.2s infinite}
-  .typing-wrap span:nth-child(2){animation-delay:.2s}
-  .typing-wrap span:nth-child(3){animation-delay:.4s}
-  @keyframes bounce{0%,60%,100%{transform:translateY(0)}30%{transform:translateY(-6px)}}
-  .prog-list{padding:8px 14px;background:var(--surface);border:1px solid var(--border);border-radius:12px;border-bottom-left-radius:4px;display:flex;flex-direction:column;gap:4px;max-width:580px}
-  .prog-item{font-size:12px;color:var(--muted);font-family:'JetBrains Mono',monospace;display:flex;align-items:flex-start;gap:6px}
-  .prog-item .t-name{color:var(--accent);font-weight:500;min-width:90px;flex-shrink:0}
-  .prog-item .t-detail{color:var(--label);word-break:break-all}
-  .input-wrap{border-top:1px solid var(--border);padding:14px 20px;display:flex;flex-direction:column;gap:6px;flex-shrink:0}
-  .chip-area{display:flex;gap:6px;flex-wrap:wrap}
-  .chip{display:inline-flex;align-items:center;gap:5px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:3px 9px;font-size:12px;color:var(--label);font-family:'JetBrains Mono',monospace}
-  .chip .rm{cursor:pointer;color:var(--muted);margin-left:2px}
-  .chip .rm:hover{color:#ef4444}
-  .input-row{display:flex;gap:8px;align-items:flex-end}
-  textarea{flex:1;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 13px;font-size:14px;color:var(--text);font-family:'Inter',sans-serif;outline:none;resize:none;min-height:44px;max-height:160px;line-height:1.5}
-  textarea:focus{border-color:var(--accent)}
-  .btn-icon{background:var(--surface);border:1px solid var(--border);border-radius:8px;color:var(--label);width:44px;height:44px;font-size:17px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:all .15s}
-  .btn-icon:hover{border-color:var(--accent);color:var(--text)}
-  .btn-send{background:var(--accent);border:none;color:#fff;padding:0 18px;border-radius:8px;font-size:14px;cursor:pointer;font-family:'Inter',sans-serif;font-weight:500;height:44px;white-space:nowrap}
-  .btn-send:hover{opacity:.85}
-  .btn-send:disabled{opacity:.4;cursor:not-allowed}
-  .btn-stop{background:#ef4444;border:none;color:#fff;padding:0 14px;border-radius:8px;font-size:13px;cursor:pointer;font-family:'Inter',sans-serif;font-weight:500;height:44px;white-space:nowrap;display:none}
-  .btn-stop:hover{opacity:.85}
-  .drop-overlay{position:fixed;inset:0;background:rgba(79,127,255,.15);border:2px dashed var(--accent);z-index:999;display:none;align-items:center;justify-content:center;font-size:20px;color:var(--accent);pointer-events:none}
-  .drop-overlay.active{display:flex}
-  .ft-tree{padding:2px 0}
-  details.ft-folder{list-style:none}
-  details.ft-folder>summary{cursor:pointer;color:var(--label);font-size:12px;padding:3px 8px 3px 4px;display:flex;align-items:center;gap:5px;border-radius:5px;list-style:none;user-select:none}
-  details.ft-folder>summary:hover{background:var(--surface2)}
-  details.ft-folder>summary::marker{display:none}
-  .ft-children{padding-left:10px;border-left:1px solid var(--border);margin-left:8px}
-  .ft-file{cursor:pointer;color:var(--muted);font-size:11px;padding:2px 8px;display:flex;align-items:center;gap:5px;border-radius:5px;font-family:'JetBrains Mono',monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .ft-file:hover{background:var(--surface2);color:var(--label)}
-  .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:1000;display:none;align-items:center;justify-content:center}
+
+  /* ── Sidebar (Assistente) ── */
+  .sidebar{width:340px;flex-shrink:0;border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden}
+  .side-head{padding:12px 14px 8px;font-size:11px;letter-spacing:.8px;text-transform:uppercase;color:var(--muted)}
+  .chat{flex:1;overflow-y:auto;padding:10px 14px;display:flex;flex-direction:column;gap:10px}
+  .chat::-webkit-scrollbar{width:4px}.chat::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+  .chat-empty{color:var(--muted);font-size:12px;text-align:center;margin:auto;padding:20px;line-height:1.6}
+  .msg{display:flex;flex-direction:column;gap:4px;max-width:100%}
+  .msg.user{align-items:flex-end}
+  .bubble{padding:9px 12px;border-radius:11px;font-size:13px;line-height:1.55;white-space:pre-wrap;word-break:break-word}
+  .msg.user .bubble{background:var(--accent);color:#fff;border-bottom-right-radius:3px}
+  .msg.agent .bubble{background:var(--surface);border:1px solid var(--border);border-bottom-left-radius:3px}
+  .sources{display:flex;gap:4px;flex-wrap:wrap}
+  .src-tag{font-size:9px;padding:1px 6px;border-radius:4px;background:var(--surface2);border:1px solid var(--border);color:var(--muted);font-family:'JetBrains Mono',monospace}
+  .prog-list{padding:7px 11px;background:var(--surface);border:1px solid var(--border);border-radius:11px;display:flex;flex-direction:column;gap:3px}
+  .prog-item{font-size:11px;color:var(--muted);font-family:'JetBrains Mono',monospace;display:flex;gap:6px}
+  .prog-item .t-name{color:var(--accent);min-width:84px;flex-shrink:0}
+  .typing-wrap{display:flex;gap:5px;padding:9px 12px;background:var(--surface);border:1px solid var(--border);border-radius:11px;width:fit-content}
+  .typing-wrap span{width:6px;height:6px;border-radius:50%;background:var(--muted);animation:b 1.2s infinite}
+  .typing-wrap span:nth-child(2){animation-delay:.2s}.typing-wrap span:nth-child(3){animation-delay:.4s}
+  @keyframes b{0%,60%,100%{transform:translateY(0)}30%{transform:translateY(-5px)}}
+  .side-actions{display:flex;flex-wrap:wrap;gap:5px;padding:8px 14px;border-top:1px solid var(--border)}
+  .chip{background:var(--surface);border:1px solid var(--border);color:var(--label);font-size:11px;padding:5px 9px;border-radius:7px;cursor:pointer;font-family:'Inter',sans-serif}
+  .chip:hover{background:var(--surface2);color:var(--text)}
+  .input-wrap{border-top:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;align-items:flex-end}
+  textarea#input{flex:1;background:var(--surface);border:1px solid var(--border);border-radius:9px;padding:9px 11px;color:var(--text);font-family:'Inter',sans-serif;font-size:13px;resize:none;outline:none;max-height:120px;line-height:1.4}
+  textarea#input:focus{border-color:var(--accent)}
+  .send-btn{background:var(--accent);border:none;color:#fff;width:38px;height:38px;border-radius:9px;cursor:pointer;font-size:15px;flex-shrink:0}
+  .send-btn:disabled{opacity:.5;cursor:not-allowed}
+  #stop-btn{display:none;background:var(--red)}
+
+  /* ── Dashboard (3 tiles) ── */
+  .main{flex:1;overflow-y:auto;padding:20px;display:grid;grid-template-columns:repeat(3,1fr);gap:16px;align-content:start}
+  @media(max-width:1100px){.main{grid-template-columns:1fr}}
+  .tile{background:var(--surface);border:1px solid var(--border);border-radius:14px;display:flex;flex-direction:column;min-height:340px;overflow:hidden}
+  .tile-head{padding:14px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
+  .tile-ico{width:34px;height:34px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:17px;flex-shrink:0}
+  .tile-ico.email{background:rgba(79,127,255,.15)}
+  .tile-ico.chat{background:rgba(124,92,255,.15)}
+  .tile-ico.todo{background:rgba(62,207,142,.15)}
+  .tile-head h2{font-size:14px;font-weight:600;flex:1}
+  .tile-count{font-size:11px;color:var(--muted);background:var(--surface2);border:1px solid var(--border);padding:2px 8px;border-radius:20px;font-family:'JetBrains Mono',monospace}
+  .tile-body{flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:9px}
+  .tile-empty{margin:auto;text-align:center;color:var(--muted);font-size:12px;line-height:1.6;padding:24px 12px}
+  .tile-empty .big{font-size:30px;opacity:.5;margin-bottom:8px}
+  .soon{display:inline-block;margin-top:10px;font-size:10px;color:var(--amber);border:1px solid rgba(245,166,35,.3);background:rgba(245,166,35,.08);padding:2px 8px;border-radius:20px}
+  /* cards de exemplo (estrutura p/ dados futuros do Graph) */
+  .card{background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:11px 12px;display:flex;flex-direction:column;gap:6px}
+  .card .c-top{display:flex;justify-content:space-between;gap:8px;font-size:11px;color:var(--muted)}
+  .card .c-title{font-size:13px;font-weight:600;color:var(--text)}
+  .card .c-snippet{font-size:12px;color:var(--label);line-height:1.5}
+  .card .c-actions{display:flex;gap:6px;margin-top:2px}
+  .c-btn{font-size:11px;padding:4px 10px;border-radius:7px;border:1px solid var(--border);cursor:pointer;background:var(--surface);color:var(--label)}
+  .c-btn.ok{background:var(--green);color:#06281c;border-color:transparent}
+  .c-btn:hover{filter:brightness(1.1)}
+  .todo-item{display:flex;align-items:flex-start;gap:9px;font-size:13px;color:var(--text)}
+  .todo-item input{margin-top:3px}
+
+  /* ── Modais ── */
+  .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:50}
   .modal-overlay.open{display:flex}
-  .modal{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px;width:420px;max-width:90vw;display:flex;flex-direction:column;gap:14px}
-  .modal h3{font-size:14px;font-weight:600}
-  .modal select,.modal input{background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:8px 11px;font-size:13px;color:var(--text);font-family:'Inter',sans-serif;outline:none;width:100%}
+  .modal{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:20px;width:440px;max-width:92vw;max-height:88vh;overflow-y:auto;display:flex;flex-direction:column;gap:14px}
+  .modal h3{font-size:15px;font-weight:600}
+  .modal .field{display:flex;flex-direction:column;gap:6px}
+  .modal label{font-size:12px;color:var(--label);font-weight:500}
+  .modal .hint{font-size:11px;color:var(--muted);line-height:1.5}
+  .modal select,.modal input[type=text],.modal input[type=time]{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:9px 11px;color:var(--text);font-size:13px;font-family:'Inter',sans-serif;outline:none}
   .modal select:focus,.modal input:focus{border-color:var(--accent)}
-  .modal-btns{display:flex;gap:8px;justify-content:flex-end}
-  .modal-btns button{padding:8px 16px;border-radius:7px;font-size:13px;cursor:pointer;font-family:'Inter',sans-serif;border:none}
-  .btn-cancel{background:var(--surface2);color:var(--label)}
-  .btn-ok{background:var(--accent);color:#fff;font-weight:500}
+  .sec{border-top:1px solid var(--border);padding-top:12px;display:flex;flex-direction:column;gap:10px}
+  .sec-title{font-size:11px;letter-spacing:.6px;text-transform:uppercase;color:var(--muted)}
+  .times{display:flex;flex-wrap:wrap;gap:6px}
+  .time-pill{display:flex;align-items:center;gap:6px;background:var(--surface2);border:1px solid var(--border);border-radius:20px;padding:3px 6px 3px 11px;font-size:12px;font-family:'JetBrains Mono',monospace}
+  .time-pill button{background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px}
+  .time-pill button:hover{color:var(--red)}
+  .add-time{display:flex;gap:6px}
+  .modal-btns{display:flex;justify-content:flex-end;gap:8px;margin-top:4px}
+  .btn-cancel{background:var(--surface2);border:1px solid var(--border);color:var(--label);padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px}
+  .btn-ok{background:var(--accent);border:none;color:#fff;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px}
+  .btn-sub{background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:8px;cursor:pointer;font-size:12px}
+  .btn-sub:hover{background:var(--border)}
 </style>
 </head>
 <body>
-
-<div class="drop-overlay" id="drop-overlay">📄 Solte o arquivo para importar</div>
-
-<!-- inputs de arquivo fora de qualquer popover -->
-<input type="file" id="inp-analyze" style="display:none" accept=".pdf,.docx,.txt,.md,.html,.htm,.csv">
-<input type="file" id="inp-ingest"  style="display:none" accept=".pdf,.docx,.txt,.md,.html,.htm,.csv,.zip">
-<input type="file" id="inp-import"  style="display:none" accept=".pdf,.docx,.txt,.md,.html,.htm,.csv,.zip">
-
 <header>
-  <h1>🧠 Obsidian Agent</h1>
-  <div class="scope-wrap">
-    <label>ESCOPO</label>
-    <select id="root-select" onchange="onRootChange()">
-      <option value="">🌐 Todo o vault</option>
-    </select>
+  <div class="brand">
+    <h1>🤵 Mordomo do Conhecimento</h1>
+    <span class="vault-badge" id="vault-badge">—</span>
   </div>
+  <button class="gear" onclick="openSettings()" title="Configurações">⚙️</button>
 </header>
 
 <div class="layout">
+  <!-- Assistente -->
   <aside class="sidebar">
-    <div class="s-label">Importar</div>
-    <button class="s-btn" onclick="document.getElementById('inp-import').click()">📄 Arquivo / PDF / ZIP</button>
-    <button class="s-btn" onclick="promptURL()">🔗 URL / Artigo</button>
-    <div class="s-label">Ações rápidas</div>
-    <button class="s-btn" onclick="runAction('weekly')">📅 Resumo semanal</button>
-    <button class="s-btn" onclick="reindex()">🔄 Reindexar ChromaDB</button>
-    <button class="s-btn" onclick="correlate()">🔗 Correlacionar notas</button>
-    <button class="s-btn" onclick="normalizeTags()">🏷️ Normalizar tags</button>
-    <button class="s-btn" onclick="openGenModal()">✨ Gerar conteúdo</button>
-    <div class="s-label">Filtrar busca</div>
-    <button class="s-btn active" id="f-all" onclick="setFilter(null,this)">🗂 Tudo</button>
-    <div id="filter-roots"></div>
-    <div class="s-label">Explorador</div>
-    <div id="file-tree" class="ft-tree"><span style="color:var(--muted);font-size:11px;padding:4px 8px;display:block">Selecione um vault</span></div>
+    <div class="side-head">Assistente</div>
+    <div class="chat" id="chat">
+      <div class="chat-empty" id="chat-empty">Converse com o agente, importe arquivos/URLs ou gere conteúdo a partir do vault.</div>
+    </div>
+    <div class="side-actions">
+      <button class="chip" onclick="document.getElementById('file-input').click()">📎 Arquivo</button>
+      <button class="chip" onclick="promptURL()">🔗 URL</button>
+      <button class="chip" onclick="openGenModal()">✨ Gerar</button>
+      <button class="chip" onclick="runAction('weekly')">📅 Semanal</button>
+      <button class="chip" onclick="correlate()">🔗 Correlacionar</button>
+      <button class="chip" onclick="normalizeTags()">🏷️ Tags</button>
+      <button class="chip" onclick="reindex()">🔄 Reindexar</button>
+      <input type="file" id="file-input" style="display:none" onchange="if(this.files[0]){uploadFile(this.files[0]);this.value=''}">
+    </div>
+    <div class="input-wrap">
+      <textarea id="input" rows="1" placeholder="Pergunte ao agente…" oninput="autoGrow(this)" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMessage()}"></textarea>
+      <button class="send-btn" id="send-btn" onclick="sendMessage()">➤</button>
+      <button class="send-btn" id="stop-btn" onclick="stopAgent()">■</button>
+    </div>
   </aside>
 
-  <div class="main">
-    <div class="chat scrollbar-thin" id="chat">
-      <div class="empty" id="empty">
-        <div class="icon">🔍</div>
-        <h2>Pergunte sobre seu vault</h2>
-        <p>Use as ações rápidas ou digite uma pergunta. O agente busca nas suas notas e responde com base no contexto real.</p>
+  <!-- Dashboard -->
+  <main class="main">
+    <section class="tile">
+      <div class="tile-head"><div class="tile-ico email">📧</div><h2>Email</h2><span class="tile-count" id="email-count">0</span></div>
+      <div class="tile-body" id="email-body">
+        <div class="tile-empty"><div class="big">📧</div>Rascunhos que o agente preparar a partir dos seus emails aparecem aqui, prontos para você revisar e liberar o envio.<br><span class="soon">Microsoft Graph — em breve</span></div>
       </div>
-    </div>
+    </section>
 
-    <div class="input-wrap">
-      <div class="chip-area" id="chip-area"></div>
-      <div class="input-row">
-        <button class="btn-icon" title="Analisar arquivo no chat" onclick="document.getElementById('inp-analyze').click()">🔍</button>
-        <button class="btn-icon" title="Salvar arquivo no vault"  onclick="document.getElementById('inp-ingest').click()">📎</button>
-        <textarea id="input" placeholder="Pergunte algo... (Enter envia, Shift+Enter nova linha)"
-          onkeydown="handleKey(event)" oninput="autoResize(this)" rows="1"></textarea>
-        <button class="btn-stop" id="stop-btn" onclick="stopAgent()">⏹ Stop</button>
-        <button class="btn-send" id="send-btn" onclick="sendMessage()">Enviar</button>
+    <section class="tile">
+      <div class="tile-head"><div class="tile-ico chat">💬</div><h2>Chat (Teams)</h2><span class="tile-count" id="chat-count">0</span></div>
+      <div class="tile-body" id="chat-body">
+        <div class="tile-empty"><div class="big">💬</div>Respostas sugeridas para conversas do Microsoft Teams aparecem aqui como rascunhos, para você aprovar e enviar.<br><span class="soon">Microsoft Graph — em breve</span></div>
       </div>
-    </div>
-  </div>
+    </section>
+
+    <section class="tile">
+      <div class="tile-head"><div class="tile-ico todo">✅</div><h2>To-dos</h2><span class="tile-count" id="todo-count">0</span></div>
+      <div class="tile-body" id="todo-body">
+        <div class="tile-empty"><div class="big">✅</div>Tarefas que o agente extrair dos seus emails e conversas aparecem aqui como uma lista de afazeres.<br><span class="soon">Microsoft Graph — em breve</span></div>
+      </div>
+    </section>
+  </main>
 </div>
 
-<script>
-  var activeFilter = null;
-  var activeRoot   = null;
-  var attachedFile = null; // {file, mode:'analyze'|'ingest'}
-
-  // ── File inputs ─────────────────────────────────────────────────────────────
-  document.getElementById('inp-analyze').addEventListener('change', function(e) {
-    var f = e.target.files[0]; if (!f) return;
-    e.target.value = '';
-    attachedFile = {file: f, mode: 'analyze'};
-    renderChip(f.name, 'analyze');
-  });
-  document.getElementById('inp-ingest').addEventListener('change', function(e) {
-    var f = e.target.files[0]; if (!f) return;
-    e.target.value = '';
-    attachedFile = {file: f, mode: 'ingest'};
-    renderChip(f.name, 'ingest');
-  });
-  document.getElementById('inp-import').addEventListener('change', function(e) {
-    var f = e.target.files[0]; if (!f) return;
-    e.target.value = '';
-    uploadFile(f);
-  });
-
-  function renderChip(name, mode) {
-    var lbl = mode === 'analyze' ? '🔍 analisar' : '💾 vault';
-    document.getElementById('chip-area').innerHTML =
-      '<div class="chip">📎 ' + name + ' <span style="color:var(--accent)">' + lbl + '</span>' +
-      '<span class="rm" onclick="clearAttach()">×</span></div>';
-  }
-  function clearAttach() {
-    attachedFile = null;
-    document.getElementById('chip-area').innerHTML = '';
-  }
-
-  // ── Roots ───────────────────────────────────────────────────────────────────
-  function onRootChange() {
-    activeRoot = document.getElementById('root-select').value || null;
-    loadFileTree(activeRoot);
-  }
-  function getRoot() { return activeRoot; }
-
-  // ── File explorer ────────────────────────────────────────────────────────────
-  function renderTree(items, container) {
-    items.forEach(function(item) {
-      if (item.type === 'folder') {
-        var det = document.createElement('details');
-        det.className = 'ft-folder';
-        var sum = document.createElement('summary');
-        sum.innerHTML = '📁 ' + item.name;
-        det.appendChild(sum);
-        var ch = document.createElement('div');
-        ch.className = 'ft-children';
-        renderTree(item.children || [], ch);
-        det.appendChild(ch);
-        container.appendChild(det);
-      } else {
-        var div = document.createElement('div');
-        div.className = 'ft-file';
-        div.title = item.id;
-        div.innerHTML = '📄 ' + item.name;
-        div.onclick = (function(id) { return function() { openNote(id); }; })(item.id);
-        container.appendChild(div);
-      }
-    });
-  }
-
-  async function loadFileTree(vault) {
-    var treeDiv = document.getElementById('file-tree');
-    if (!treeDiv) return;
-    if (!vault) { treeDiv.innerHTML = '<span style="color:var(--muted);font-size:11px;padding:4px 8px;display:block">Selecione um vault</span>'; return; }
-    treeDiv.innerHTML = '<span style="color:var(--muted);font-size:11px;padding:4px 8px;display:block">Carregando...</span>';
-    try {
-      var r = await fetch('/api/notes/tree?vault=' + encodeURIComponent(vault));
-      var d = await r.json();
-      treeDiv.innerHTML = '';
-      if (d.error || !d.tree || d.tree.length === 0) {
-        treeDiv.innerHTML = '<span style="color:var(--muted);font-size:11px;padding:4px 8px;display:block">Sem notas</span>';
-        return;
-      }
-      renderTree(d.tree, treeDiv);
-    } catch(e) {
-      treeDiv.innerHTML = '<span style="color:var(--muted);font-size:11px;padding:4px 8px;display:block">Erro ao carregar</span>';
-    }
-  }
-
-  async function openNote(noteId) {
-    appendMsg('user', '📄 ' + noteId);
-    appendTyping();
-    setBusy(true);
-    try {
-      var vault = getRoot();
-      var url = '/api/note/read?note_id=' + encodeURIComponent(noteId) + (vault ? '&vault=' + encodeURIComponent(vault) : '');
-      var r = await fetch(url);
-      var d = await r.json();
-      removeTyping();
-      appendMsg('agent', d.content || d.error || '(nota vazia)', [noteId]);
-    } catch(e) { removeTyping(); appendMsg('agent', '❌ Erro ao abrir nota.'); }
-    setBusy(false);
-  }
-
-  async function loadRoots() {
-    try {
-      var r      = await fetch('/api/vaults');
-      var data   = await r.json();
-      var vaults = data.vaults || [];
-      console.log('api/vaults resposta:', JSON.stringify(data));
-
-      if (vaults.length === 0) {
-        console.warn('Nenhum vault retornado. Verifique os logs do container (docker logs obsidian-agent).');
-      }
-
-      var sel  = document.getElementById('root-select');
-      var filt = document.getElementById('filter-roots');
-      vaults.forEach(function(v) {
-        var opt = document.createElement('option');
-        opt.value = v;
-        opt.textContent = '🗄️ ' + v;
-        sel.appendChild(opt);
-
-        var btn = document.createElement('button');
-        btn.className = 's-btn';
-        btn.textContent = '🗄️ ' + v;
-        btn.onclick = (function(name, b) { return function() { setFilter(name, b); }; })(v, btn);
-        filt.appendChild(btn);
-      });
-    } catch(e) { console.warn('loadVaults error', e); }
-  }
-
-  function setFilter(col, el) {
-    activeFilter = col;
-    document.querySelectorAll('.sidebar .s-btn').forEach(function(b) { b.classList.remove('active'); });
-    el.classList.add('active');
-  }
-
-  // ── UI helpers ───────────────────────────────────────────────────────────────
-  function autoResize(el) {
-    el.style.height = 'auto';
-    el.style.height = Math.min(el.scrollHeight, 160) + 'px';
-  }
-  function handleKey(e) {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
-  }
-  function fmtTime() {
-    return new Date().toLocaleTimeString('pt-BR', {hour:'2-digit', minute:'2-digit'});
-  }
-  function appendMsg(role, content, sources) {
-    var chat = document.getElementById('chat');
-    var emp  = document.getElementById('empty');
-    if (emp) emp.remove();
-
-    var div    = document.createElement('div');
-    div.className = 'msg ' + role;
-    var bubble = document.createElement('div');
-    bubble.className = 'bubble';
-    bubble.textContent = content;
-    div.appendChild(bubble);
-
-    if (sources && sources.length) {
-      var src = document.createElement('div');
-      src.className = 'sources';
-      sources.forEach(function(s) {
-        var tag = document.createElement('span');
-        tag.className = 'src-tag';
-        tag.textContent = s.split('/').pop();
-        tag.title = s;
-        src.appendChild(tag);
-      });
-      div.appendChild(src);
-    }
-    var ts = document.createElement('div');
-    ts.className = 'msg-time';
-    ts.textContent = fmtTime();
-    div.appendChild(ts);
-    chat.appendChild(div);
-    chat.scrollTop = chat.scrollHeight;
-    return div;
-  }
-  function appendTyping() {
-    var chat = document.getElementById('chat');
-    var div  = document.createElement('div');
-    div.className = 'msg agent';
-    div.id = 'typing';
-    div.innerHTML = '<div class="typing-wrap"><span></span><span></span><span></span></div>';
-    chat.appendChild(div);
-    chat.scrollTop = chat.scrollHeight;
-  }
-  function removeTyping() { var el = document.getElementById('typing'); if(el) el.remove(); }
-
-  function createProgPanel() {
-    var chat = document.getElementById('chat');
-    var emp  = document.getElementById('empty'); if(emp) emp.remove();
-    var div  = document.createElement('div');
-    div.className = 'msg agent'; div.id = 'prog-panel';
-    var list = document.createElement('div');
-    list.className = 'prog-list';
-    div.appendChild(list);
-    chat.appendChild(div);
-    chat.scrollTop = chat.scrollHeight;
-    return list;
-  }
-  function addProgItem(list, tool, detail) {
-    var item = document.createElement('div');
-    item.className = 'prog-item';
-    item.innerHTML = '<span class="t-name">' + tool + '</span><span class="t-detail">' + (detail||'') + '</span>';
-    list.appendChild(item);
-    document.getElementById('chat').scrollTop = 99999;
-  }
-  function removeProgPanel() { var el = document.getElementById('prog-panel'); if(el) el.remove(); }
-
-  // ── Send ─────────────────────────────────────────────────────────────────────
-  async function sendMessage() {
-    var input   = document.getElementById('input');
-    var q       = input.value.trim();
-    var hasFile = attachedFile !== null;
-    if (!q && !hasFile) return;
-
-    input.value = '';
-    input.style.height = 'auto';
-    setBusy(true);
-
-    var userLabel = hasFile ? ('📎 ' + attachedFile.file.name + (q ? '\\n' + q : '')) : q;
-    appendMsg('user', userLabel);
-
-    // Salvar arquivo no vault
-    if (hasFile && attachedFile.mode === 'ingest') {
-      var snap = attachedFile; clearAttach();
-      appendTyping();
-      var form = new FormData();
-      form.append('file', snap.file);
-      if (getRoot()) form.append('vault', getRoot());
-      try {
-        var r = await fetch('/api/upload', {method:'POST', body:form});
-        var d = await r.json();
-        removeTyping();
-        appendMsg('agent', d.answer, d.sources);
-      } catch(e) { removeTyping(); appendMsg('agent', '❌ Erro ao importar arquivo.'); }
-      setBusy(false);
-      input.focus(); return;
-    }
-
-    // Análise de arquivo ou pergunta normal (SSE)
-    var url, init;
-    if (hasFile && attachedFile.mode === 'analyze') {
-      var snap = attachedFile; clearAttach();
-      var form = new FormData();
-      form.append('file', snap.file);
-      if (q) form.append('question', q);
-      if (getRoot()) form.append('vault', getRoot());
-      url = '/api/analyze/stream'; init = {method:'POST', body:form};
-    } else {
-      var body = {question: q};
-      if (activeFilter) body.collections = [activeFilter];
-      if (getRoot()) body.vault = getRoot();
-      url = '/api/ask/stream';
-      init = {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)};
-    }
-
-    var progList = null;
-    try {
-      var resp = await fetch(url, init);
-      if (!resp.ok) throw new Error('http ' + resp.status);
-      progList = createProgPanel();
-      var reader  = resp.body.getReader();
-      var decoder = new TextDecoder();
-      var buf     = '';
-      while (true) {
-        var chunk = await reader.read();
-        if (chunk.done) break;
-        buf += decoder.decode(chunk.value, {stream:true});
-        var lines = buf.split('\\n');
-        buf = lines.pop();
-        for (var i = 0; i < lines.length; i++) {
-          var line = lines[i];
-          if (!line.startsWith('data: ')) continue;
-          try {
-            var evt = JSON.parse(line.slice(6));
-            if (evt.type === 'progress') { addProgItem(progList, evt.tool, evt.detail); }
-            else if (evt.type === 'done')  { removeProgPanel(); appendMsg('agent', evt.answer, evt.sources); }
-            else if (evt.type === 'error') { removeProgPanel(); appendMsg('agent', '❌ ' + evt.message); }
-          } catch(e) {}
-        }
-      }
-    } catch(e) {
-      removeProgPanel(); removeTyping();
-      appendMsg('agent', '❌ Erro de conexão com o agente. Verifique os logs.');
-    }
-    setBusy(false);
-    input.focus();
-  }
-
-  // ── Upload direto (sidebar / drag-drop) ─────────────────────────────────────
-  async function uploadFile(file) {
-    appendMsg('user', (file.name.endsWith('.zip') ? '🗜 ' : '📄 ') + 'Importando: ' + file.name);
-    appendTyping();
-    setBusy(true);
-    var form = new FormData();
-    form.append('file', file);
-    if (getRoot()) form.append('vault', getRoot());
-    try {
-      var r = await fetch('/api/upload', {method:'POST', body:form});
-      var d = await r.json();
-      removeTyping(); appendMsg('agent', d.answer, d.sources);
-    } catch(e) { removeTyping(); appendMsg('agent', '❌ Erro ao importar.'); }
-    setBusy(false);
-  }
-
-  async function promptURL() {
-    var url = prompt('Cole a URL do artigo ou página:');
-    if (!url || !url.startsWith('http')) return;
-    appendMsg('user', '🔗 ' + url);
-    appendTyping();
-    setBusy(true);
-    try {
-      var r = await fetch('/api/upload-url', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url:url, vault:getRoot()})});
-      var d = await r.json();
-      removeTyping(); appendMsg('agent', d.answer, d.sources);
-    } catch(e) { removeTyping(); appendMsg('agent', '❌ Erro ao importar URL.'); }
-    setBusy(false);
-  }
-
-  async function runAction(action) {
-    var labels = {weekly:'📅 Resumo semanal'};
-    appendMsg('user', labels[action] + (getRoot() ? ' (' + getRoot() + ')' : ''));
-    appendTyping();
-    setBusy(true);
-    try {
-      var r = await fetch('/api/' + action, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({vault:getRoot()})});
-      var d = await r.json();
-      removeTyping(); appendMsg('agent', d.answer, d.sources);
-    } catch(e) { removeTyping(); appendMsg('agent', '❌ Erro ao executar ação.'); }
-    setBusy(false);
-  }
-
-  async function normalizeTags() {
-    appendMsg('user', '🏷️ Normalizar tags' + (getRoot() ? ' (' + getRoot() + ')' : ''));
-    appendTyping();
-    setBusy(true);
-    try {
-      var r = await fetch('/api/normalize-tags', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({vault:getRoot()})});
-      var d = await r.json();
-      removeTyping(); appendMsg('agent', d.answer, d.sources);
-    } catch(e) { removeTyping(); appendMsg('agent', '❌ Erro ao normalizar tags.'); }
-    setBusy(false);
-  }
-
-  async function reindex() {
-    appendMsg('user', '🔄 Reindexar ChromaDB' + (getRoot() ? ' (' + getRoot() + ')' : ''));
-    appendTyping();
-    setBusy(true);
-    try {
-      var r = await fetch('/api/reindex', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({vault:getRoot()})});
-      var d = await r.json();
-      removeTyping(); appendMsg('agent', d.answer, d.sources);
-    } catch(e) { removeTyping(); appendMsg('agent', '❌ Erro ao reindexar.'); }
-    setBusy(false);
-  }
-
-  async function correlate() {
-    appendMsg('user', '🔗 Correlacionar notas' + (getRoot() ? ' (' + getRoot() + ')' : ''));
-    appendTyping();
-    setBusy(true);
-    try {
-      var r = await fetch('/api/correlate', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({vault:getRoot()})});
-      var d = await r.json();
-      removeTyping(); appendMsg('agent', d.answer, d.sources);
-    } catch(e) { removeTyping(); appendMsg('agent', '❌ Erro ao correlacionar.'); }
-    setBusy(false);
-  }
-
-  async function stopAgent() {
-    try { await fetch('/api/stop', {method:'POST'}); } catch(e) {}
-    setBusy(false);
-    removeTyping(); removeProgPanel();
-    appendMsg('agent', '⛔ Operação interrompida.');
-  }
-
-  function setBusy(on) {
-    document.getElementById('send-btn').disabled = on;
-    document.getElementById('stop-btn').style.display = on ? 'block' : 'none';
-  }
-
-  // ── Drag & drop ──────────────────────────────────────────────────────────────
-  document.addEventListener('dragover', function(e) { e.preventDefault(); document.getElementById('drop-overlay').classList.add('active'); });
-  document.addEventListener('dragleave', function(e) { if (!e.relatedTarget) document.getElementById('drop-overlay').classList.remove('active'); });
-  document.addEventListener('drop', function(e) {
-    e.preventDefault();
-    document.getElementById('drop-overlay').classList.remove('active');
-    var f = e.dataTransfer.files[0]; if (f) uploadFile(f);
-  });
-
-  loadRoots();
-</script>
-
+<!-- Modal: Gerar conteúdo -->
 <div class="modal-overlay" id="gen-modal">
   <div class="modal">
     <h3>✨ Gerar conteúdo</h3>
-    <select id="gen-template">
-      <option value="relatorio">📊 Relatório</option>
-      <option value="email">📧 Email</option>
-      <option value="apresentacao">🗂 Apresentação</option>
-      <option value="resumo">📝 Resumo Executivo</option>
-    </select>
-    <input id="gen-topic" placeholder="Tema ou pergunta (ex: análise da Haleon 2024)">
+    <div class="field">
+      <label>Tipo</label>
+      <select id="gen-template">
+        <option value="relatorio">📊 Relatório</option>
+        <option value="email">📧 Email</option>
+        <option value="apresentacao">🗂 Apresentação</option>
+        <option value="resumo">📝 Resumo Executivo</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Tema</label>
+      <input type="text" id="gen-topic" placeholder="ex: análise da Haleon 2024">
+    </div>
     <div class="modal-btns">
       <button class="btn-cancel" onclick="closeGenModal()">Cancelar</button>
       <button class="btn-ok" onclick="submitGenerate()">Gerar</button>
@@ -586,36 +211,160 @@ HTML = """<!DOCTYPE html>
   </div>
 </div>
 
+<!-- Modal: Configurações -->
+<div class="modal-overlay" id="settings-modal">
+  <div class="modal">
+    <h3>⚙️ Configurações</h3>
+
+    <div class="field">
+      <label>Modelo (LLM)</label>
+      <select id="set-model">
+        <option value="sonnet">Claude Sonnet — equilíbrio (padrão)</option>
+        <option value="opus">Claude Opus — máxima capacidade</option>
+        <option value="haiku">Claude Haiku — rápido e econômico</option>
+      </select>
+      <div class="hint">Usa sua assinatura Claude Pro. Modelos mais fortes consomem mais da sua cota.</div>
+    </div>
+
+    <div class="sec">
+      <div class="sec-title">ChromaDB — Reindexação</div>
+      <div class="hint">O índice é atualizado continuamente quando você edita notas no Obsidian. Abaixo você pode agendar reindexações completas (horário do servidor) e rodar uma agora.</div>
+      <div class="field">
+        <label>Horários agendados</label>
+        <div class="times" id="times"></div>
+        <div class="add-time">
+          <input type="time" id="new-time" value="03:00">
+          <button class="btn-sub" onclick="addTime()">+ Adicionar</button>
+        </div>
+      </div>
+      <button class="btn-sub" onclick="reindexNow()">🔄 Reindexar agora</button>
+    </div>
+
+    <div class="modal-btns">
+      <button class="btn-cancel" onclick="closeSettings()">Cancelar</button>
+      <button class="btn-ok" onclick="saveSettings()">Salvar</button>
+    </div>
+  </div>
+</div>
+
 <script>
-function openGenModal() {
-  document.getElementById('gen-modal').classList.add('open');
-  document.getElementById('gen-topic').focus();
-}
-function closeGenModal() {
-  document.getElementById('gen-modal').classList.remove('open');
-}
-async function submitGenerate() {
-  var topic    = document.getElementById('gen-topic').value.trim();
-  var template = document.getElementById('gen-template').value;
-  if (!topic) return;
-  closeGenModal();
-  appendMsg('user', '✨ Gerar ' + document.getElementById('gen-template').options[document.getElementById('gen-template').selectedIndex].text + ': ' + topic);
-  appendTyping();
-  setBusy(true);
-  try {
-    var r = await fetch('/api/generate', {method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({topic:topic, template:template, vault:getRoot()})});
-    var d = await r.json();
-    removeTyping(); appendMsg('agent', d.answer, d.sources);
-  } catch(e) { removeTyping(); appendMsg('agent', '❌ Erro ao gerar.'); }
-  setBusy(false);
-}
-// Fechar modal com Escape
-document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closeGenModal(); });
+  var VAULT = '';
+  var _times = [];
+
+  function fmtTime(){var d=new Date();return d.getHours().toString().padStart(2,'0')+':'+d.getMinutes().toString().padStart(2,'0');}
+  function getRoot(){return VAULT;}
+  function autoGrow(el){el.style.height='auto';el.style.height=Math.min(el.scrollHeight,120)+'px';}
+  function setBusy(on){document.getElementById('send-btn').style.display=on?'none':'flex';document.getElementById('stop-btn').style.display=on?'flex':'none';document.getElementById('input').disabled=on;}
+
+  async function loadVault(){
+    try{
+      var r=await fetch('/api/vaults');var d=await r.json();
+      VAULT=(d.vaults&&d.vaults[0])||'';
+      document.getElementById('vault-badge').textContent=VAULT||'(sem vault)';
+    }catch(e){document.getElementById('vault-badge').textContent='(erro)';}
+  }
+
+  // ── Chat ──
+  function appendMsg(role,content,sources){
+    var chat=document.getElementById('chat');var emp=document.getElementById('chat-empty');if(emp)emp.remove();
+    var div=document.createElement('div');div.className='msg '+role;
+    var b=document.createElement('div');b.className='bubble';b.textContent=content;div.appendChild(b);
+    if(sources&&sources.length){var s=document.createElement('div');s.className='sources';sources.forEach(function(x){var t=document.createElement('span');t.className='src-tag';t.textContent=x.split('/').pop();t.title=x;s.appendChild(t);});div.appendChild(s);}
+    chat.appendChild(div);chat.scrollTop=chat.scrollHeight;return div;
+  }
+  function appendTyping(){var c=document.getElementById('chat');var e=document.getElementById('chat-empty');if(e)e.remove();var d=document.createElement('div');d.className='msg agent';d.id='typing';d.innerHTML='<div class="typing-wrap"><span></span><span></span><span></span></div>';c.appendChild(d);c.scrollTop=c.scrollHeight;}
+  function removeTyping(){var e=document.getElementById('typing');if(e)e.remove();}
+  function createProgPanel(){var c=document.getElementById('chat');var e=document.getElementById('chat-empty');if(e)e.remove();var d=document.createElement('div');d.className='msg agent';d.id='prog-panel';var l=document.createElement('div');l.className='prog-list';d.appendChild(l);c.appendChild(d);c.scrollTop=c.scrollHeight;return l;}
+  function addProgItem(l,tool,detail){var i=document.createElement('div');i.className='prog-item';i.innerHTML='<span class="t-name">'+tool+'</span><span class="t-detail">'+(detail||'')+'</span>';l.appendChild(i);document.getElementById('chat').scrollTop=99999;}
+  function removeProgPanel(){var e=document.getElementById('prog-panel');if(e)e.remove();}
+
+  async function sendMessage(){
+    var input=document.getElementById('input');var q=input.value.trim();if(!q)return;
+    input.value='';input.style.height='auto';setBusy(true);appendMsg('user',q);
+    var body={question:q};if(getRoot())body.vault=getRoot();
+    var progList=null;
+    try{
+      var resp=await fetch('/api/ask/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+      if(!resp.ok)throw new Error('http '+resp.status);
+      progList=createProgPanel();
+      var reader=resp.body.getReader();var dec=new TextDecoder();var buf='';
+      while(true){var ch=await reader.read();if(ch.done)break;buf+=dec.decode(ch.value,{stream:true});var lines=buf.split('\\n');buf=lines.pop();
+        for(var i=0;i<lines.length;i++){var line=lines[i];if(!line.startsWith('data: '))continue;
+          try{var evt=JSON.parse(line.slice(6));
+            if(evt.type==='progress'){addProgItem(progList,evt.tool,evt.detail);}
+            else if(evt.type==='done'){removeProgPanel();appendMsg('agent',evt.answer,evt.sources);}
+            else if(evt.type==='error'){removeProgPanel();appendMsg('agent','❌ '+evt.message);}
+          }catch(e){}}}
+    }catch(e){removeProgPanel();removeTyping();appendMsg('agent','❌ Erro de conexão com o agente.');}
+    setBusy(false);input.focus();
+  }
+
+  async function uploadFile(file){
+    appendMsg('user',(file.name.endsWith('.zip')?'🗜 ':'📄 ')+'Importando: '+file.name);appendTyping();setBusy(true);
+    var form=new FormData();form.append('file',file);if(getRoot())form.append('vault',getRoot());
+    try{var r=await fetch('/api/upload',{method:'POST',body:form});var d=await r.json();removeTyping();appendMsg('agent',d.answer,d.sources);}
+    catch(e){removeTyping();appendMsg('agent','❌ Erro ao importar.');}
+    setBusy(false);
+  }
+  async function promptURL(){
+    var url=prompt('Cole a URL do artigo ou página:');if(!url||!url.startsWith('http'))return;
+    appendMsg('user','🔗 '+url);appendTyping();setBusy(true);
+    try{var r=await fetch('/api/upload-url',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:url,vault:getRoot()})});var d=await r.json();removeTyping();appendMsg('agent',d.answer,d.sources);}
+    catch(e){removeTyping();appendMsg('agent','❌ Erro ao importar URL.');}
+    setBusy(false);
+  }
+  async function runAction(a){appendMsg('user','📅 Resumo semanal');appendTyping();setBusy(true);
+    try{var r=await fetch('/api/'+a,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vault:getRoot()})});var d=await r.json();removeTyping();appendMsg('agent',d.answer,d.sources);}
+    catch(e){removeTyping();appendMsg('agent','❌ Erro ao executar ação.');}setBusy(false);}
+  async function normalizeTags(){appendMsg('user','🏷️ Normalizar tags');appendTyping();setBusy(true);
+    try{var r=await fetch('/api/normalize-tags',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vault:getRoot()})});var d=await r.json();removeTyping();appendMsg('agent',d.answer,d.sources);}
+    catch(e){removeTyping();appendMsg('agent','❌ Erro ao normalizar tags.');}setBusy(false);}
+  async function reindex(){appendMsg('user','🔄 Reindexar ChromaDB');appendTyping();setBusy(true);
+    try{var r=await fetch('/api/reindex',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vault:getRoot()})});var d=await r.json();removeTyping();appendMsg('agent',d.answer,d.sources);}
+    catch(e){removeTyping();appendMsg('agent','❌ Erro ao reindexar.');}setBusy(false);}
+  async function correlate(){appendMsg('user','🔗 Correlacionar notas');appendTyping();setBusy(true);
+    try{var r=await fetch('/api/correlate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vault:getRoot()})});var d=await r.json();removeTyping();appendMsg('agent',d.answer,d.sources);}
+    catch(e){removeTyping();appendMsg('agent','❌ Erro ao correlacionar.');}setBusy(false);}
+  async function stopAgent(){try{await fetch('/api/stop',{method:'POST'});}catch(e){}setBusy(false);removeTyping();removeProgPanel();appendMsg('agent','⛔ Operação interrompida.');}
+
+  // ── Gerar ──
+  function openGenModal(){document.getElementById('gen-modal').classList.add('open');document.getElementById('gen-topic').focus();}
+  function closeGenModal(){document.getElementById('gen-modal').classList.remove('open');}
+  async function submitGenerate(){
+    var topic=document.getElementById('gen-topic').value.trim();var tmpl=document.getElementById('gen-template').value;if(!topic)return;
+    closeGenModal();var sel=document.getElementById('gen-template');appendMsg('user','✨ Gerar '+sel.options[sel.selectedIndex].text+': '+topic);appendTyping();setBusy(true);
+    try{var r=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({topic:topic,template:tmpl,vault:getRoot()})});var d=await r.json();removeTyping();appendMsg('agent',d.answer,d.sources);}
+    catch(e){removeTyping();appendMsg('agent','❌ Erro ao gerar.');}setBusy(false);
+  }
+
+  // ── Settings ──
+  function renderTimes(){
+    var w=document.getElementById('times');w.innerHTML='';
+    if(!_times.length){w.innerHTML='<span class="hint">Nenhum horário agendado.</span>';}
+    _times.forEach(function(t,idx){var p=document.createElement('span');p.className='time-pill';p.innerHTML=t+' <button onclick="rmTime('+idx+')">×</button>';w.appendChild(p);});
+  }
+  function addTime(){var t=document.getElementById('new-time').value;if(t&&_times.indexOf(t)<0){_times.push(t);_times.sort();renderTimes();}}
+  function rmTime(i){_times.splice(i,1);renderTimes();}
+  async function openSettings(){
+    try{var r=await fetch('/api/settings');var d=await r.json();document.getElementById('set-model').value=d.model||'sonnet';_times=(d.reindex_times||[]).slice();}
+    catch(e){_times=[];}
+    renderTimes();document.getElementById('settings-modal').classList.add('open');
+  }
+  function closeSettings(){document.getElementById('settings-modal').classList.remove('open');}
+  async function saveSettings(){
+    var body={model:document.getElementById('set-model').value,reindex_times:_times};
+    try{await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});}catch(e){}
+    closeSettings();appendMsg('agent','⚙️ Configurações salvas. Modelo: '+body.model+(body.reindex_times.length?(' · reindex: '+body.reindex_times.join(', ')):''));
+  }
+  async function reindexNow(){closeSettings();reindex();}
+
+  document.addEventListener('keydown',function(e){if(e.key==='Escape'){closeGenModal();closeSettings();}});
+  loadVault();
 </script>
 </body>
 </html>
 """
+
 
 # ── Rotas ────────────────────────────────────────────────────────────────────
 @app.route("/")
@@ -958,9 +707,46 @@ def api_generate():
     return jsonify(generate_output(topic, template, vault=vault))
 
 
+@app.route("/api/settings", methods=["GET", "POST"])
+def api_settings():
+    if request.method == "POST":
+        patch = request.get_json(silent=True) or {}
+        return jsonify(app_settings.save_settings(patch))
+    return jsonify(app_settings.get_settings())
+
+
 @app.route("/health")
 def health():
     return jsonify({"status": "ok"})
+
+
+# ── Scheduler de reindexação do ChromaDB ─────────────────────────────────────
+def _reindex_scheduler():
+    """Dispara reindex_vault() nos horários HH:MM configurados em settings (1x por minuto)."""
+    import time as _t
+    last_fired = None
+    while True:
+        try:
+            now = _t.strftime("%H:%M")
+            if now != last_fired and now in set(app_settings.get_settings().get("reindex_times", [])):
+                last_fired = now
+                log.info(f"[scheduler] reindex agendado disparado às {now}")
+                try:
+                    reindex_vault()
+                except Exception as e:
+                    log.error(f"[scheduler] erro no reindex: {e}")
+        except Exception as e:
+            log.warning(f"[scheduler] erro: {e}")
+        _t.sleep(20)
+
+
+def _start_scheduler():
+    t = threading.Thread(target=_reindex_scheduler, daemon=True, name="reindex-scheduler")
+    t.start()
+    log.info("[scheduler] iniciado")
+
+
+_start_scheduler()
 
 
 if __name__ == "__main__":

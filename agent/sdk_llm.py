@@ -19,8 +19,16 @@ log = logging.getLogger(__name__)
 # Garante que o token da assinatura seja usado (API key teria precedência).
 os.environ.pop("ANTHROPIC_API_KEY", None)
 
-MODEL     = os.environ.get("ANTHROPIC_MODEL", "sonnet")
 MAX_TURNS = int(os.environ.get("AGENT_MAX_TURNS", 40))
+
+
+def current_model() -> str:
+    """Modelo escolhido nas settings (fallback para o env/padrão)."""
+    try:
+        from core.settings import get_settings
+        return get_settings().get("model") or os.environ.get("ANTHROPIC_MODEL", "sonnet")
+    except Exception:
+        return os.environ.get("ANTHROPIC_MODEL", "sonnet")
 
 _SERVER_NAME = "vault"
 
@@ -131,7 +139,7 @@ def _options(system_prompt: str, db, sources: list, on_progress):
     server = _build_server(db, sources, on_progress)
     return ClaudeAgentOptions(
         system_prompt=system_prompt,
-        model=MODEL,
+        model=current_model(),
         mcp_servers={_SERVER_NAME: server},
         allowed_tools=[f"mcp__{_SERVER_NAME}__*"],
         tools=[],                     # desliga as ferramentas nativas (só MCP do vault)
@@ -177,7 +185,7 @@ def run_agent(system_prompt: str, question: str, db, on_progress=None) -> dict:
 async def _complete_async(system: str, user: str) -> str:
     from claude_agent_sdk import query, ClaudeAgentOptions, ResultMessage, AssistantMessage, TextBlock
     opts = ClaudeAgentOptions(system_prompt=system, tools=[], max_turns=1,
-                              model=MODEL, setting_sources=[], permission_mode="default")
+                              model=current_model(), setting_sources=[], permission_mode="default")
     out = ""
     async for msg in query(prompt=user, options=opts):
         if isinstance(msg, AssistantMessage):
