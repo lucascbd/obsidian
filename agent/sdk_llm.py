@@ -42,6 +42,10 @@ def _build_server(db, sources: list, on_progress):
     `sources` acumula note_ids modificados; `on_progress` é chamado a cada tool call."""
     from claude_agent_sdk import tool, create_sdk_mcp_server
     import agent  # import tardio evita ciclo no import do módulo
+    from core import state
+
+    def _ev(kind, summary, ref=""):
+        state.record_event(db, actor="agent", kind=kind, summary=summary, source="vault", ref=ref)
 
     def _progress(name, detail):
         if on_progress:
@@ -95,7 +99,9 @@ def _build_server(db, sources: list, on_progress):
     async def create_note(args):
         _progress("create_note", args.get("path", ""))
         sources.append(args.get("path", ""))
-        return _text(await _run(agent.tool_create_note, args["path"], args["content"], db=db))
+        res = await _run(agent.tool_create_note, args["path"], args["content"], db=db)
+        _ev("nota_criada", f"Criou a nota {args.get('path','')}", ref=args.get("path", ""))
+        return _text(res)
 
     @tool("edit_note", "Edita (sobrescreve) o conteúdo de uma nota existente. Leia antes de editar.",
           {"type": "object", "properties": {"note_id": {"type": "string"}, "content": {"type": "string"}},
@@ -103,7 +109,9 @@ def _build_server(db, sources: list, on_progress):
     async def edit_note(args):
         _progress("edit_note", args.get("note_id", ""))
         sources.append(args.get("note_id", ""))
-        return _text(await _run(agent.tool_edit_note, args["note_id"], args["content"], db=db))
+        res = await _run(agent.tool_edit_note, args["note_id"], args["content"], db=db)
+        _ev("nota_editada", f"Editou a nota {args.get('note_id','')}", ref=args.get("note_id", ""))
+        return _text(res)
 
     @tool("move_note", "Move/renomeia uma nota (source_id → dest_id).",
           {"type": "object", "properties": {"source_id": {"type": "string"}, "dest_id": {"type": "string"}},
@@ -111,14 +119,18 @@ def _build_server(db, sources: list, on_progress):
     async def move_note(args):
         _progress("move_note", f"{args.get('source_id','')} → {args.get('dest_id','')}")
         sources.append(args.get("dest_id", ""))
-        return _text(await _run(agent.tool_move_note, args["source_id"], args["dest_id"], db=db))
+        res = await _run(agent.tool_move_note, args["source_id"], args["dest_id"], db=db)
+        _ev("nota_movida", f"Moveu {args.get('source_id','')} → {args.get('dest_id','')}", ref=args.get("dest_id", ""))
+        return _text(res)
 
     @tool("delete_note", "Deleta uma nota. Use só para duplicatas confirmadas ou a pedido do usuário.",
           {"type": "object", "properties": {"note_id": {"type": "string"}}, "required": ["note_id"]})
     async def delete_note(args):
         _progress("delete_note", args.get("note_id", ""))
         sources.append(args.get("note_id", ""))
-        return _text(await _run(agent.tool_delete_note, args["note_id"], db=db))
+        res = await _run(agent.tool_delete_note, args["note_id"], db=db)
+        _ev("nota_deletada", f"Deletou a nota {args.get('note_id','')}", ref=args.get("note_id", ""))
+        return _text(res)
 
     @tool("add_tags", "Adiciona tags ao frontmatter de uma nota (sem duplicar).",
           {"type": "object", "properties": {"note_id": {"type": "string"},
@@ -127,10 +139,28 @@ def _build_server(db, sources: list, on_progress):
     async def add_tags(args):
         _progress("add_tags", f"{args.get('note_id','')} +{args.get('tags',[])}")
         sources.append(args.get("note_id", ""))
-        return _text(await _run(agent.tool_add_tags, args["note_id"], args["tags"], db=db))
+        res = await _run(agent.tool_add_tags, args["note_id"], args["tags"], db=db)
+        _ev("tags_adicionadas", f"Tags em {args.get('note_id','')}: {args.get('tags',[])}", ref=args.get("note_id", ""))
+        return _text(res)
+
+    @tool("query_events",
+          "Consulta a linha do tempo de atividade (o que o agente e o usuário fizeram). "
+          "Use para perguntas sobre um PERÍODO (ex.: 'resumo entre X e Y', 'o que aconteceu ontem'). "
+          "Comece por aqui para perguntas temporais; aprofunde no vault (read_note/search_vault) só o que precisar.",
+          {"type": "object", "properties": {
+              "date_from": {"type": "string", "description": "YYYY-MM-DD (inclusive)"},
+              "date_to": {"type": "string", "description": "YYYY-MM-DD (inclusive)"},
+              "actor": {"type": "string", "description": "agent | user | system (opcional)"},
+              "kind": {"type": "string", "description": "tipo de evento (opcional)"}}})
+    async def query_events(args):
+        _progress("query_events", f"{args.get('date_from','')}..{args.get('date_to','')}")
+        import json as _json
+        rows = await _run(state.query_events, db, args.get("date_from"), args.get("date_to"),
+                          args.get("actor"), args.get("kind"))
+        return _text(_json.dumps(rows, ensure_ascii=False))
 
     tools = [search_vault, get_neighbors, graph_search, read_note, list_notes,
-             create_note, edit_note, move_note, delete_note, add_tags]
+             create_note, edit_note, move_note, delete_note, add_tags, query_events]
     return create_sdk_mcp_server(name=_SERVER_NAME, version="1.0.0", tools=tools)
 
 

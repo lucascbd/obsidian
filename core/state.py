@@ -56,8 +56,66 @@ def init_db() -> None:
                 PRIMARY KEY (vault, src, dst)
             );
             CREATE INDEX IF NOT EXISTS idx_links_dst ON links (vault, dst);
+            CREATE TABLE IF NOT EXISTS events (
+                id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts      REAL NOT NULL,
+                ts_iso  TEXT NOT NULL,
+                vault   TEXT,
+                actor   TEXT,
+                kind    TEXT,
+                source  TEXT,
+                ref     TEXT,
+                summary TEXT,
+                detail  TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_events_ts ON events (ts_iso);
             """
         )
+
+
+# ── Registro de atividade (linha do tempo) ───────────────────────────────────────
+
+def record_event(vault: str, actor: str, kind: str, summary: str,
+                 source: str = "", ref: str = "", detail=None) -> None:
+    """Grava um evento na linha do tempo. actor='agent'|'user'|'system'."""
+    import time, json as _json
+    now = time.time()
+    ts_iso = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
+    det = detail if isinstance(detail, str) else (_json.dumps(detail, ensure_ascii=False) if detail else "")
+    try:
+        with _lock, _conn() as c:
+            c.execute(
+                "INSERT INTO events (ts, ts_iso, vault, actor, kind, source, ref, summary, detail) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (now, ts_iso, vault, actor, kind, source, ref, (summary or "")[:500], det[:4000]),
+            )
+    except Exception:
+        pass  # log de atividade nunca deve derrubar uma ação
+
+
+def query_events(vault: str = None, date_from: str = None, date_to: str = None,
+                 actor: str = None, kind: str = None, limit: int = 500) -> list:
+    """Retorna eventos ordenados por tempo. date_from/date_to no formato YYYY-MM-DD
+    (inclusivos, comparados pela data do ts_iso)."""
+    clauses, params = [], []
+    if vault:
+        clauses.append("vault = ?"); params.append(vault)
+    if date_from:
+        clauses.append("substr(ts_iso,1,10) >= ?"); params.append(date_from[:10])
+    if date_to:
+        clauses.append("substr(ts_iso,1,10) <= ?"); params.append(date_to[:10])
+    if actor:
+        clauses.append("actor = ?"); params.append(actor)
+    if kind:
+        clauses.append("kind = ?"); params.append(kind)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    params.append(max(1, min(limit, 2000)))
+    with _conn() as c:
+        rows = c.execute(
+            f"SELECT ts_iso, actor, kind, source, ref, summary FROM events {where} "
+            f"ORDER BY ts ASC LIMIT ?", params,
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # ── Controle de alterações ──────────────────────────────────────────────────────

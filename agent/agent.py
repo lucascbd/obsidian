@@ -249,6 +249,8 @@ def reindex_vault(vault: Optional[str] = None) -> dict:
         col = chroma.get_or_create_collection(col_nm)
         stats = indexer.reconcile(v, col=col, force=True)
         results.append(f"[{v}] {stats['indexed']} nota(s) reindexadas")
+        state.record_event(v, actor="system", kind="reindex",
+                           summary=f"Reindexou o ChromaDB ({stats['indexed']} notas)", source="chromadb")
 
         try:
             _build_vault_indices(v, col)
@@ -674,6 +676,8 @@ def ingest(raw_text: str, source_name: str, vault: Optional[str] = None, db: str
 
         result = tool_create_note(path, content, db=db)
         log.info(f"Ingest: {result}")
+        state.record_event(_vault(db), actor="agent", kind="ingest",
+                           summary=f"Importou '{source_name}' → {path}", source="ingest", ref=path)
 
         return {
             "answer":  f"{summary}\n\nNota criada: `{path}`\n\n{result}",
@@ -1095,6 +1099,12 @@ FERRAMENTAS (use as ferramentas disponíveis — não descreva chamadas em texto
 - list_notes → ver caminhos/estrutura de pastas (NUNCA para ler conteúdo em loop)
 - read_note → ler o conteúdo de uma nota já identificada como relevante
 - create_note / edit_note / move_note / delete_note / add_tags → alterações no vault
+- query_events → linha do tempo de atividade (o que você e o usuário fizeram, com data/hora)
+
+PERGUNTAS SOBRE UM PERÍODO (ex.: "resumo entre X e Y", "o que fiz essa semana"):
+- Comece por query_events(date_from, date_to) para obter a linha do tempo.
+- Depois aprofunde no vault (read_note/search_vault) SÓ nos itens que precisam de mais contexto.
+- Monte a narrativa combinando o "quando/o quê" (eventos) com o "sobre o quê" (notas).
 
 USO EFICIENTE — OBRIGATÓRIO:
 - NUNCA faça list_notes + read_note em loop para analisar o vault (é O(n) e lento).
@@ -1239,6 +1249,7 @@ def ask(question: str, collections: Optional[list] = None, vault: Optional[str] 
     system_prompt = SDK_SYSTEM_PROMPT + settings_ctx + vault_ctx
 
     reset_stop()
+    state.record_event(db, actor="user", kind="pergunta", summary=question[:300], source="chat")
     result = sdk_llm.run_agent(system_prompt, question, db, on_progress=on_progress)
     answer  = result.get("answer", "Concluído.")
     sources = result.get("sources", [])
@@ -1511,6 +1522,8 @@ def vault_review(vault: Optional[str] = None) -> dict:
             "sources": [],
         }
 
+    state.record_event(vault_name, actor="system", kind="correlate",
+                       summary=f"Correlacionou notas e adicionou links em {len(edited)} nota(s)", source="chromadb")
     return {
         "answer": (
             f"Vault revisado via ChromaDB — {len(note_embeddings)} notas, zero chamadas LLM.\n"
