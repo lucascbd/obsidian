@@ -9,7 +9,7 @@ import logging
 import threading
 from flask import Flask, request, jsonify, render_template_string, Response, stream_with_context
 from flask_cors import CORS
-from agent import ask, weekly_summary, summarize_meeting, vault_review, normalize_tags, purge_vault, ingest_file, ingest_url, ingest_zip, get_vaults, stop_agent, reset_stop, tool_read_note, reindex_vault, generate_output
+from agent import ask, weekly_summary, summarize_meeting, vault_review, normalize_tags, purge_vault, ingest_file, ingest_url, ingest_zip, get_vaults, stop_agent, reset_stop, tool_read_note, reindex_vault, rebuild_indices, generate_output
 from core import vault_fs
 from core import settings as app_settings
 
@@ -227,8 +227,8 @@ HTML = """<!DOCTYPE html>
     </div>
 
     <div class="sec">
-      <div class="sec-title">ChromaDB — Reindexação</div>
-      <div class="hint">O índice é atualizado continuamente quando você edita notas no Obsidian. Abaixo você pode agendar reindexações completas (horário do servidor) e rodar uma agora.</div>
+      <div class="sec-title">Índices do Obsidian (00-meta/indices)</div>
+      <div class="hint">Regenera os mapas navegáveis do vault (um índice por pasta + mapa geral). A busca semântica (ChromaDB) já é mantida em dia automaticamente pelo watcher — isto <b>não</b> rebuilda o ChromaDB. Horários em hora do servidor.</div>
       <div class="field">
         <label>Horários agendados</label>
         <div class="times" id="times"></div>
@@ -237,7 +237,7 @@ HTML = """<!DOCTYPE html>
           <button class="btn-sub" onclick="addTime()">+ Adicionar</button>
         </div>
       </div>
-      <button class="btn-sub" onclick="reindexNow()">🔄 Reindexar agora</button>
+      <button class="btn-sub" onclick="rebuildIndicesNow()">🗺 Atualizar índices agora</button>
     </div>
 
     <div class="modal-btns">
@@ -356,7 +356,11 @@ HTML = """<!DOCTYPE html>
     try{await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});}catch(e){}
     closeSettings();appendMsg('agent','⚙️ Configurações salvas. Modelo: '+body.model+(body.reindex_times.length?(' · reindex: '+body.reindex_times.join(', ')):''));
   }
-  async function reindexNow(){closeSettings();reindex();}
+  async function rebuildIndicesNow(){
+    closeSettings();appendMsg('user','🗺 Atualizar índices do Obsidian');appendTyping();setBusy(true);
+    try{var r=await fetch('/api/rebuild-indices',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vault:getRoot()})});var d=await r.json();removeTyping();appendMsg('agent',d.answer,d.sources);}
+    catch(e){removeTyping();appendMsg('agent','❌ Erro ao atualizar índices.');}setBusy(false);
+  }
 
   document.addEventListener('keydown',function(e){if(e.key==='Escape'){closeGenModal();closeSettings();}});
   loadVault();
@@ -707,6 +711,14 @@ def api_generate():
     return jsonify(generate_output(topic, template, vault=vault))
 
 
+@app.route("/api/rebuild-indices", methods=["POST"])
+def api_rebuild_indices():
+    """Atualiza SÓ os índices MOC do Obsidian (não mexe no ChromaDB)."""
+    data  = request.get_json(silent=True) or {}
+    vault = data.get("vault") or None
+    return jsonify(rebuild_indices(vault=vault))
+
+
 @app.route("/api/settings", methods=["GET", "POST"])
 def api_settings():
     if request.method == "POST":
@@ -721,8 +733,9 @@ def health():
 
 
 # ── Scheduler de reindexação do ChromaDB ─────────────────────────────────────
-def _reindex_scheduler():
-    """Dispara reindex_vault() nos horários HH:MM configurados em settings (1x por minuto)."""
+def _indices_scheduler():
+    """Atualiza os índices do Obsidian (00-meta/indices) nos horários HH:MM configurados.
+    NÃO rebuilda o ChromaDB — o watcher mantém o índice em dia continuamente."""
     import time as _t
     last_fired = None
     while True:
@@ -730,20 +743,20 @@ def _reindex_scheduler():
             now = _t.strftime("%H:%M")
             if now != last_fired and now in set(app_settings.get_settings().get("reindex_times", [])):
                 last_fired = now
-                log.info(f"[scheduler] reindex agendado disparado às {now}")
+                log.info(f"[indices-scheduler] atualização de índices disparada às {now}")
                 try:
-                    reindex_vault()
+                    rebuild_indices()
                 except Exception as e:
-                    log.error(f"[scheduler] erro no reindex: {e}")
+                    log.error(f"[indices-scheduler] erro: {e}")
         except Exception as e:
-            log.warning(f"[scheduler] erro: {e}")
+            log.warning(f"[indices-scheduler] erro: {e}")
         _t.sleep(20)
 
 
 def _start_scheduler():
-    t = threading.Thread(target=_reindex_scheduler, daemon=True, name="reindex-scheduler")
+    t = threading.Thread(target=_indices_scheduler, daemon=True, name="indices-scheduler")
     t.start()
-    log.info("[scheduler] iniciado")
+    log.info("[indices-scheduler] iniciado")
 
 
 _start_scheduler()

@@ -264,6 +264,28 @@ def reindex_vault(vault: Optional[str] = None) -> dict:
     }
 
 
+def rebuild_indices(vault: Optional[str] = None) -> dict:
+    """Regenera SÓ os índices MOC do Obsidian (00-meta/indices/) a partir dos metadados
+    que já estão no ChromaDB. NÃO apaga nem re-embeda a coleção (o watcher mantém o Chroma
+    em dia continuamente)."""
+    vaults_to_run = [vault] if vault else get_vaults()
+    results = []
+    for v in vaults_to_run:
+        try:
+            col = get_chroma().get_or_create_collection(_col_name(v))
+            _build_vault_indices(v, col)
+            results.append(f"[{v}] índices Obsidian atualizados em 00-meta/indices/")
+            state.record_event(v, actor="system", kind="indices",
+                               summary="Atualizou os índices do Obsidian (00-meta/indices)", source="obsidian")
+        except Exception as e:
+            log.error(f"[indices] erro em {v}: {e}")
+            results.append(f"[{v}] erro: {e}")
+    return {
+        "answer": "✅ Índices do Obsidian atualizados:\n" + "\n".join(f"- {r}" for r in results),
+        "sources": [],
+    }
+
+
 def _build_vault_indices(vault: str, col) -> None:
     """Gera notas de índice (MOC) em 00-meta/indices/ a partir dos metadados no ChromaDB.
     Um índice por pasta raiz + mapa geral. Zero LLM."""
