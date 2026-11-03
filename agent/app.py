@@ -85,7 +85,7 @@ HTML = """<!DOCTYPE html>
   .tile-head{padding:14px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
   .tile-ico{width:34px;height:34px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:17px;flex-shrink:0}
   .tile-ico.email{background:rgba(79,127,255,.15)}
-  .tile-ico.chat{background:rgba(124,92,255,.15)}
+  .tile-ico.teams{background:rgba(124,92,255,.15)}
   .tile-ico.todo{background:rgba(62,207,142,.15)}
   .tile-head h2{font-size:14px;font-weight:600;flex:1}
   .tile-count{font-size:11px;color:var(--muted);background:var(--surface2);border:1px solid var(--border);padding:2px 8px;border-radius:20px;font-family:'JetBrains Mono',monospace}
@@ -172,7 +172,7 @@ HTML = """<!DOCTYPE html>
     </section>
 
     <section class="tile">
-      <div class="tile-head"><div class="tile-ico chat">💬</div><h2>Chat (Teams)</h2><span class="tile-count" id="chat-count">0</span></div>
+      <div class="tile-head"><div class="tile-ico teams">💬</div><h2>Chat (Teams)</h2><span class="tile-count" id="chat-count">0</span></div>
       <div class="tile-body" id="chat-body">
         <div class="tile-empty"><div class="big">💬</div>Respostas sugeridas para conversas do Microsoft Teams aparecem aqui como rascunhos, para você aprovar e enviar.<br><span class="soon">Microsoft Graph — em breve</span></div>
       </div>
