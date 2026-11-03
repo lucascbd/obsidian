@@ -148,11 +148,6 @@ HTML = """<!DOCTYPE html>
     <div class="side-actions">
       <button class="chip" onclick="document.getElementById('file-input').click()">📎 Arquivo</button>
       <button class="chip" onclick="promptURL()">🔗 URL</button>
-      <button class="chip" onclick="openGenModal()">✨ Gerar</button>
-      <button class="chip" onclick="runAction('weekly')">📅 Semanal</button>
-      <button class="chip" onclick="correlate()">🔗 Correlacionar</button>
-      <button class="chip" onclick="normalizeTags()">🏷️ Tags</button>
-      <button class="chip" onclick="reindex()">🔄 Reindexar</button>
       <input type="file" id="file-input" style="display:none" onchange="if(this.files[0]){uploadFile(this.files[0]);this.value=''}">
     </div>
     <div class="input-wrap">
@@ -187,29 +182,6 @@ HTML = """<!DOCTYPE html>
   </main>
 </div>
 
-<!-- Modal: Gerar conteúdo -->
-<div class="modal-overlay" id="gen-modal">
-  <div class="modal">
-    <h3>✨ Gerar conteúdo</h3>
-    <div class="field">
-      <label>Tipo</label>
-      <select id="gen-template">
-        <option value="relatorio">📊 Relatório</option>
-        <option value="email">📧 Email</option>
-        <option value="apresentacao">🗂 Apresentação</option>
-        <option value="resumo">📝 Resumo Executivo</option>
-      </select>
-    </div>
-    <div class="field">
-      <label>Tema</label>
-      <input type="text" id="gen-topic" placeholder="ex: análise da Haleon 2024">
-    </div>
-    <div class="modal-btns">
-      <button class="btn-cancel" onclick="closeGenModal()">Cancelar</button>
-      <button class="btn-ok" onclick="submitGenerate()">Gerar</button>
-    </div>
-  </div>
-</div>
 
 <!-- Modal: Configurações -->
 <div class="modal-overlay" id="settings-modal">
@@ -238,6 +210,12 @@ HTML = """<!DOCTYPE html>
         </div>
       </div>
       <button class="btn-sub" onclick="maintenanceNow()">🧹 Rodar manutenção agora</button>
+    </div>
+
+    <div class="sec">
+      <div class="sec-title">ChromaDB — Avançado</div>
+      <div class="hint">O índice semântico é mantido em dia automaticamente pelo watcher. Reconstrua do zero só em manutenção (ex.: troca de modelo de embeddings) ou recuperação.</div>
+      <button class="btn-sub" onclick="reindexFull()">🔄 Reindexar ChromaDB (completo)</button>
     </div>
 
     <div class="modal-btns">
@@ -327,16 +305,6 @@ HTML = """<!DOCTYPE html>
     catch(e){removeTyping();appendMsg('agent','❌ Erro ao correlacionar.');}setBusy(false);}
   async function stopAgent(){try{await fetch('/api/stop',{method:'POST'});}catch(e){}setBusy(false);removeTyping();removeProgPanel();appendMsg('agent','⛔ Operação interrompida.');}
 
-  // ── Gerar ──
-  function openGenModal(){document.getElementById('gen-modal').classList.add('open');document.getElementById('gen-topic').focus();}
-  function closeGenModal(){document.getElementById('gen-modal').classList.remove('open');}
-  async function submitGenerate(){
-    var topic=document.getElementById('gen-topic').value.trim();var tmpl=document.getElementById('gen-template').value;if(!topic)return;
-    closeGenModal();var sel=document.getElementById('gen-template');appendMsg('user','✨ Gerar '+sel.options[sel.selectedIndex].text+': '+topic);appendTyping();setBusy(true);
-    try{var r=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({topic:topic,template:tmpl,vault:getRoot()})});var d=await r.json();removeTyping();appendMsg('agent',d.answer,d.sources);}
-    catch(e){removeTyping();appendMsg('agent','❌ Erro ao gerar.');}setBusy(false);
-  }
-
   // ── Settings ──
   function renderTimes(){
     var w=document.getElementById('times');w.innerHTML='';
@@ -361,8 +329,9 @@ HTML = """<!DOCTYPE html>
     try{var r=await fetch('/api/maintenance',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vault:getRoot()})});var d=await r.json();removeTyping();appendMsg('agent',d.answer,d.sources);}
     catch(e){removeTyping();appendMsg('agent','❌ Erro na manutenção.');}setBusy(false);
   }
+  async function reindexFull(){closeSettings();reindex();}
 
-  document.addEventListener('keydown',function(e){if(e.key==='Escape'){closeGenModal();closeSettings();}});
+  document.addEventListener('keydown',function(e){if(e.key==='Escape'){closeSettings();}});
   loadVault();
 </script>
 </body>
