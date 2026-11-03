@@ -9,7 +9,7 @@ import logging
 import threading
 from flask import Flask, request, jsonify, render_template_string, Response, stream_with_context
 from flask_cors import CORS
-from agent import ask, weekly_summary, summarize_meeting, vault_review, normalize_tags, purge_vault, ingest_file, ingest_url, ingest_zip, get_vaults, stop_agent, reset_stop, tool_read_note, reindex_vault, rebuild_indices, generate_output
+from agent import ask, weekly_summary, summarize_meeting, vault_review, normalize_tags, purge_vault, ingest_file, ingest_url, ingest_zip, get_vaults, stop_agent, reset_stop, tool_read_note, reindex_vault, rebuild_indices, obsidian_maintenance, generate_output
 from core import vault_fs
 from core import settings as app_settings
 
@@ -227,8 +227,8 @@ HTML = """<!DOCTYPE html>
     </div>
 
     <div class="sec">
-      <div class="sec-title">Índices do Obsidian (00-meta/indices)</div>
-      <div class="hint">Regenera os mapas navegáveis do vault (um índice por pasta + mapa geral). A busca semântica (ChromaDB) já é mantida em dia automaticamente pelo watcher — isto <b>não</b> rebuilda o ChromaDB. Horários em hora do servidor.</div>
+      <div class="sec-title">Manutenção do Obsidian</div>
+      <div class="hint">Nos horários abaixo, roda a manutenção de garantia do vault (sem custo de LLM): <b>correlaciona</b> as notas (links "Notas Relacionadas") e <b>regenera os índices</b> (00-meta/indices). A busca semântica (ChromaDB) já é mantida em dia pelo watcher — isto <b>não</b> rebuilda o ChromaDB. Horários em hora do servidor.</div>
       <div class="field">
         <label>Horários agendados</label>
         <div class="times" id="times"></div>
@@ -237,7 +237,7 @@ HTML = """<!DOCTYPE html>
           <button class="btn-sub" onclick="addTime()">+ Adicionar</button>
         </div>
       </div>
-      <button class="btn-sub" onclick="rebuildIndicesNow()">🗺 Atualizar índices agora</button>
+      <button class="btn-sub" onclick="maintenanceNow()">🧹 Rodar manutenção agora</button>
     </div>
 
     <div class="modal-btns">
@@ -356,10 +356,10 @@ HTML = """<!DOCTYPE html>
     try{await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});}catch(e){}
     closeSettings();appendMsg('agent','⚙️ Configurações salvas. Modelo: '+body.model+(body.reindex_times.length?(' · reindex: '+body.reindex_times.join(', ')):''));
   }
-  async function rebuildIndicesNow(){
-    closeSettings();appendMsg('user','🗺 Atualizar índices do Obsidian');appendTyping();setBusy(true);
-    try{var r=await fetch('/api/rebuild-indices',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vault:getRoot()})});var d=await r.json();removeTyping();appendMsg('agent',d.answer,d.sources);}
-    catch(e){removeTyping();appendMsg('agent','❌ Erro ao atualizar índices.');}setBusy(false);
+  async function maintenanceNow(){
+    closeSettings();appendMsg('user','🧹 Manutenção do Obsidian (correlacionar + índices)');appendTyping();setBusy(true);
+    try{var r=await fetch('/api/maintenance',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vault:getRoot()})});var d=await r.json();removeTyping();appendMsg('agent',d.answer,d.sources);}
+    catch(e){removeTyping();appendMsg('agent','❌ Erro na manutenção.');}setBusy(false);
   }
 
   document.addEventListener('keydown',function(e){if(e.key==='Escape'){closeGenModal();closeSettings();}});
@@ -719,6 +719,14 @@ def api_rebuild_indices():
     return jsonify(rebuild_indices(vault=vault))
 
 
+@app.route("/api/maintenance", methods=["POST"])
+def api_maintenance():
+    """Manutenção do Obsidian: correlaciona notas + regenera índices (zero LLM, sem rebuild do Chroma)."""
+    data  = request.get_json(silent=True) or {}
+    vault = data.get("vault") or None
+    return jsonify(obsidian_maintenance(vault=vault))
+
+
 @app.route("/api/settings", methods=["GET", "POST"])
 def api_settings():
     if request.method == "POST":
@@ -743,9 +751,9 @@ def _indices_scheduler():
             now = _t.strftime("%H:%M")
             if now != last_fired and now in set(app_settings.get_settings().get("reindex_times", [])):
                 last_fired = now
-                log.info(f"[indices-scheduler] atualização de índices disparada às {now}")
+                log.info(f"[indices-scheduler] manutenção do Obsidian disparada às {now}")
                 try:
-                    rebuild_indices()
+                    obsidian_maintenance()
                 except Exception as e:
                     log.error(f"[indices-scheduler] erro: {e}")
         except Exception as e:

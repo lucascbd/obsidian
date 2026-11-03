@@ -264,6 +264,27 @@ def reindex_vault(vault: Optional[str] = None) -> dict:
     }
 
 
+def obsidian_maintenance(vault: Optional[str] = None) -> dict:
+    """Manutenção de garantia do Obsidian (zero LLM): correlaciona notas (links
+    '## Notas Relacionadas' via similaridade do Chroma) e regenera os índices MOC.
+    Não rebuilda o ChromaDB — o watcher já mantém o índice em dia."""
+    vaults_to_run = [vault] if vault else get_vaults()
+    parts = []
+    for v in vaults_to_run:
+        try:
+            parts.append(vault_review(v).get("answer", ""))
+        except Exception as e:
+            log.error(f"[maintenance] correlate erro em {v}: {e}")
+            parts.append(f"[{v}] erro ao correlacionar: {e}")
+        try:
+            parts.append(rebuild_indices(v).get("answer", ""))
+        except Exception as e:
+            log.error(f"[maintenance] indices erro em {v}: {e}")
+            parts.append(f"[{v}] erro nos índices: {e}")
+    return {"answer": "✅ Manutenção do Obsidian concluída:\n\n" + "\n\n".join(p for p in parts if p),
+            "sources": []}
+
+
 def rebuild_indices(vault: Optional[str] = None) -> dict:
     """Regenera SÓ os índices MOC do Obsidian (00-meta/indices/) a partir dos metadados
     que já estão no ChromaDB. NÃO apaga nem re-embeda a coleção (o watcher mantém o Chroma
