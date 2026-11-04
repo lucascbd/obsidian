@@ -62,21 +62,35 @@ def _auth() -> str:
 
     app = msal.PublicClientApplication(CLIENT_ID, authority=AUTHORITY, token_cache=cache)
 
+    # Por padrão usa o fluxo INTERATIVO (abre o navegador do PC). O device code
+    # costuma ser bloqueado por Conditional Access (erro 53003). Para forçar o
+    # device code mesmo assim: set GRAPH_PROBE_DEVICE=1
+    use_device = os.environ.get("GRAPH_PROBE_DEVICE") == "1"
+
     result = None
     accounts = app.get_accounts()
     if accounts:
         result = app.acquire_token_silent(SCOPES, account=accounts[0])
 
-    if not result:
+    if not result and use_device:
         flow = app.initiate_device_flow(scopes=SCOPES)
         if "user_code" not in flow:
             print("❌ Falha ao iniciar o device flow (o tenant pode bloquear este client):")
             print(json.dumps(flow, indent=2, ensure_ascii=False))
             sys.exit(1)
         print("\n" + "=" * 60)
-        print(flow["message"])   # "To sign in, use a web browser to open ... and enter the code ..."
+        print(flow["message"])
         print("=" * 60 + "\n")
-        result = app.acquire_token_by_device_flow(flow)   # bloqueia até você autorizar
+        result = app.acquire_token_by_device_flow(flow)
+
+    if not result:
+        print("\nAbrindo o navegador para login (fluxo interativo)…")
+        print("Se não abrir sozinho, confira se há uma janela/aba do navegador aguardando.\n")
+        try:
+            result = app.acquire_token_interactive(SCOPES, prompt="select_account")
+        except Exception as e:
+            print("❌ Não foi possível abrir o fluxo interativo:", e)
+            sys.exit(1)
 
     if cache.has_state_changed:
         try:
@@ -85,11 +99,18 @@ def _auth() -> str:
             pass
 
     if "access_token" not in result:
-        print("❌ Autenticação/consentimento NEGADO:")
+        desc = (result.get("error_description") or "")
+        print("❌ Autenticação NEGADA:")
         print("   error:", result.get("error"))
-        print("   desc :", (result.get("error_description") or "")[:600])
-        print("\nProvável causa: consentimento de usuário desligado no tenant, ou")
-        print("conditional access bloqueando. É exatamente o que precisávamos saber.")
+        print("   desc :", desc[:600])
+        if "53003" in desc:
+            print("\n→ 53003 = Conditional Access. Se o INTERATIVO também deu isso, o admin")
+            print("  bloqueia o próprio app 'Microsoft Graph Command Line Tools' (não só o")
+            print("  device code). Nesse caso, sem app aprovado não dá — partimos pro plano B:")
+            print("  Outlook local (COM) p/ email, e Teams só com liberação do TI.")
+        else:
+            print("\n→ Pode ser consentimento de usuário desligado ou outra política.")
+        print("  Me manda esta mensagem inteira que eu te digo o próximo passo.")
         sys.exit(1)
 
     print("✅ Autenticado com sucesso.")
