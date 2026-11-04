@@ -9,7 +9,7 @@ import logging
 import threading
 from flask import Flask, request, jsonify, render_template_string, Response, stream_with_context
 from flask_cors import CORS
-from agent import ask, weekly_summary, summarize_meeting, vault_review, normalize_tags, purge_vault, ingest_file, ingest_url, ingest_zip, get_vaults, stop_agent, reset_stop, tool_read_note, reindex_vault, rebuild_indices, obsidian_maintenance, generate_output
+from agent import ask, weekly_summary, summarize_meeting, vault_review, normalize_tags, purge_vault, ingest_file, ingest_url, ingest_zip, get_vaults, stop_agent, reset_stop, tool_read_note, reindex_vault, rebuild_indices, obsidian_maintenance, generate_output, ingest_email
 from core import vault_fs
 from core import settings as app_settings
 
@@ -678,6 +678,28 @@ def api_generate():
     if not topic:
         return jsonify({"error": "topic obrigatório"}), 400
     return jsonify(generate_output(topic, template, vault=vault))
+
+
+# Chave para os endpoints máquina-a-máquina (coletor de email/Teams). Como o
+# agente fica exposto na internet, estes endpoints exigem a chave configurada.
+AGENT_API_KEY = os.environ.get("AGENT_API_KEY", "")
+
+
+@app.route("/api/ingest-email", methods=["POST"])
+def api_ingest_email():
+    if not AGENT_API_KEY:
+        return jsonify({"error": "AGENT_API_KEY não configurada no servidor"}), 503
+    if request.headers.get("X-Api-Key") != AGENT_API_KEY:
+        return jsonify({"error": "unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    if not (data.get("subject") or data.get("body")):
+        return jsonify({"error": "subject/body obrigatórios"}), 400
+    return jsonify(ingest_email(
+        subject=data.get("subject", ""), sender=data.get("from", ""),
+        date=data.get("date", ""), body=data.get("body", ""),
+        msg_id=data.get("msg_id", ""), web_link=data.get("web_link", ""),
+        vault=data.get("vault") or None,
+    ))
 
 
 @app.route("/api/rebuild-indices", methods=["POST"])

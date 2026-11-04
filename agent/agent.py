@@ -731,6 +731,56 @@ def ingest(raw_text: str, source_name: str, vault: Optional[str] = None, db: str
     return {"answer": "Falha ao processar o conteúdo após 3 tentativas.", "sources": []}
 
 
+def _inject_frontmatter_keys(vault: str, note_id: str, keys: dict) -> None:
+    """Garante no frontmatter da nota os pares informados (ponteiro p/ a fonte).
+    Não duplica chaves já presentes."""
+    try:
+        content = vault_fs.read_note(vault, note_id)
+    except Exception:
+        return
+    add_lines = [f"{k}: {v}" for k, v in keys.items() if v]
+    if not add_lines:
+        return
+    if content.startswith("---"):
+        end = content.find("\n---", 3)
+        if end != -1:
+            fm = content[3:end]
+            add = "\n".join(l for l in add_lines if not re.search(rf"(?m)^{re.escape(l.split(':')[0])}:", fm))
+            new = "---" + fm + (("\n" + add) if add else "") + content[end:]
+            vault_fs.write_note(vault, note_id, new)
+            return
+    fm_block = "---\n" + "\n".join(add_lines) + "\n---\n"
+    vault_fs.write_note(vault, note_id, fm_block + content)
+
+
+def ingest_email(subject: str, sender: str, date: str, body: str,
+                 msg_id: str = "", web_link: str = "", vault: Optional[str] = None,
+                 db: str = None) -> dict:
+    """Destila um email em nota do vault (conhecimento destilado + ponteiro p/ a fonte).
+    Reaproveita o pipeline de ingestão (LLM distila → nota → auto-link → watcher indexa)."""
+    db = db or vault
+    raw = (
+        f"Assunto: {subject}\n"
+        f"De: {sender}\n"
+        f"Data: {date}\n\n"
+        f"{body}"
+    )
+    res = ingest(raw, source_name=f"email: {subject or '(sem assunto)'}", vault=vault, db=db)
+    path = res.get("path")
+    if path:
+        _inject_frontmatter_keys(_vault(db), path, {
+            "source":     "outlook",
+            "msg_id":     msg_id,
+            "from":       sender,
+            "email_date": date,
+            "web_link":   web_link,
+        })
+        state.record_event(_vault(db), actor="agent", kind="email",
+                           summary=f"Email de {sender}: {subject}"[:200],
+                           source="outlook", ref=msg_id or path)
+    return res
+
+
 def ingest_file(filename: str, content: bytes, vault: Optional[str] = None, db: str = None) -> dict:
     raw_text = _extract_text_from_file(filename, content)
     return ingest(raw_text, source_name=filename, vault=vault, db=db)

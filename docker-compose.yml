@@ -88,6 +88,9 @@ services:
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN}
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-sonnet}
       FLASK_SECRET_KEY: ${FLASK_SECRET_KEY}
+      # Chave dos endpoints máquina-a-máquina (coletor de email). Obrigatória
+      # para /api/ingest-email funcionar quando o agente está exposto.
+      AGENT_API_KEY: ${AGENT_API_KEY:-}
     volumes:
       - ./vaults:/vaults
       - ./data:/data

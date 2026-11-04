@@ -21,3 +21,6 @@ Thumbs.db
 
 # Cache de token do probe do Graph (não commitar)
 scripts/graph_probe_cache.bin
+
+# Estado do coletor de email (não commitar)
+scripts/outlook_collector_state.json
