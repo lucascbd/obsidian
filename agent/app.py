@@ -198,6 +198,12 @@ HTML = """<!DOCTYPE html>
       <div class="hint">Usa sua assinatura Claude Pro. Modelos mais fortes consomem mais da sua cota.</div>
     </div>
 
+    <div class="field">
+      <label>Coletor — intervalo de verificação (segundos)</label>
+      <input type="text" id="set-poll" placeholder="300">
+      <div class="hint">De quanto em quanto tempo o coletor de email busca mensagens novas. Padrão 300 (5 min). Mínimo 30.</div>
+    </div>
+
     <div class="sec">
       <div class="sec-title">Manutenção do Obsidian</div>
       <div class="hint">Nos horários abaixo, roda a manutenção de garantia do vault (sem custo de LLM): <b>correlaciona</b> as notas (links "Notas Relacionadas") e <b>regenera os índices</b> (00-meta/indices). A busca semântica (ChromaDB) já é mantida em dia pelo watcher — isto <b>não</b> rebuilda o ChromaDB. Horários em hora do servidor.</div>
@@ -314,13 +320,13 @@ HTML = """<!DOCTYPE html>
   function addTime(){var t=document.getElementById('new-time').value;if(t&&_times.indexOf(t)<0){_times.push(t);_times.sort();renderTimes();}}
   function rmTime(i){_times.splice(i,1);renderTimes();}
   async function openSettings(){
-    try{var r=await fetch('/api/settings');var d=await r.json();document.getElementById('set-model').value=d.model||'sonnet';_times=(d.reindex_times||[]).slice();}
+    try{var r=await fetch('/api/settings');var d=await r.json();document.getElementById('set-model').value=d.model||'sonnet';document.getElementById('set-poll').value=d.poll_seconds||300;_times=(d.reindex_times||[]).slice();}
     catch(e){_times=[];}
     renderTimes();document.getElementById('settings-modal').classList.add('open');
   }
   function closeSettings(){document.getElementById('settings-modal').classList.remove('open');}
   async function saveSettings(){
-    var body={model:document.getElementById('set-model').value,reindex_times:_times};
+    var body={model:document.getElementById('set-model').value,reindex_times:_times,poll_seconds:parseInt(document.getElementById('set-poll').value)||300};
     try{await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});}catch(e){}
     closeSettings();appendMsg('agent','⚙️ Configurações salvas. Modelo: '+body.model+(body.reindex_times.length?(' · reindex: '+body.reindex_times.join(', ')):''));
   }
@@ -685,12 +691,43 @@ def api_generate():
 AGENT_API_KEY = os.environ.get("AGENT_API_KEY", "")
 
 
+def _machine_auth():
+    """(ok, resposta_de_erro). Endpoints máquina-a-máquina exigem AGENT_API_KEY."""
+    if not AGENT_API_KEY:
+        return False, (jsonify({"error": "AGENT_API_KEY não configurada no servidor"}), 503)
+    if request.headers.get("X-Api-Key") != AGENT_API_KEY:
+        return False, (jsonify({"error": "unauthorized"}), 401)
+    return True, None
+
+
+@app.route("/api/processed", methods=["GET"])
+def api_processed():
+    """IDs já processados de uma fonte (o coletor usa p/ mandar só os novos)."""
+    ok, err = _machine_auth()
+    if not ok:
+        return err
+    from core import state
+    source = request.args.get("source", "outlook")
+    since  = request.args.get("since") or None
+    return jsonify({"ids": state.processed_ids(source, since=since)})
+
+
+@app.route("/api/collector-config", methods=["GET"])
+def api_collector_config():
+    """Config que o coletor lê (intervalo editável nas Settings do agente)."""
+    ok, err = _machine_auth()
+    if not ok:
+        return err
+    s = app_settings.get_settings()
+    return jsonify({"poll_seconds": s.get("poll_seconds", 300),
+                    "backfill_days": s.get("backfill_days", 0)})
+
+
 @app.route("/api/ingest-email", methods=["POST"])
 def api_ingest_email():
-    if not AGENT_API_KEY:
-        return jsonify({"error": "AGENT_API_KEY não configurada no servidor"}), 503
-    if request.headers.get("X-Api-Key") != AGENT_API_KEY:
-        return jsonify({"error": "unauthorized"}), 401
+    ok, err = _machine_auth()
+    if not ok:
+        return err
     data = request.get_json(silent=True) or {}
     if not (data.get("subject") or data.get("body")):
         return jsonify({"error": "subject/body obrigatórios"}), 400

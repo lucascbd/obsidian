@@ -759,6 +759,11 @@ def ingest_email(subject: str, sender: str, date: str, body: str,
     """Destila um email em nota do vault (conhecimento destilado + ponteiro p/ a fonte).
     Reaproveita o pipeline de ingestão (LLM distila → nota → auto-link → watcher indexa)."""
     db = db or vault
+
+    # Idempotente: se já processamos este email, não destila de novo.
+    if msg_id and state.is_processed("outlook", msg_id):
+        return {"answer": "(email já processado)", "sources": [], "skipped": True}
+
     raw = (
         f"Assunto: {subject}\n"
         f"De: {sender}\n"
@@ -768,6 +773,7 @@ def ingest_email(subject: str, sender: str, date: str, body: str,
     try:
         res = ingest(raw, source_name=f"email: {subject or '(sem assunto)'}", vault=vault, db=db)
     except sdk_llm.LLMRateLimited:
+        # Não registra como processado → será retomado quando a janela do Pro renovar.
         return {"answer": "Limite de uso do LLM atingido — retome mais tarde.",
                 "sources": [], "retry": True}
     path = res.get("path")
@@ -782,6 +788,10 @@ def ingest_email(subject: str, sender: str, date: str, body: str,
         state.record_event(_vault(db), actor="agent", kind="email",
                            summary=f"Email de {sender}: {subject}"[:200],
                            source="outlook", ref=msg_id or path)
+        state.mark_processed("outlook", msg_id, item_date=date, note_path=path, status="ok")
+    else:
+        # Falha não-transitória de destilação: marca como erro p/ não reprocessar eternamente.
+        state.mark_processed("outlook", msg_id, item_date=date, status="error")
     return res
 
 

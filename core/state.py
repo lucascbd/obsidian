@@ -69,8 +69,59 @@ def init_db() -> None:
                 detail  TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_events_ts ON events (ts_iso);
+            CREATE TABLE IF NOT EXISTS processed_items (
+                source       TEXT NOT NULL,   -- 'outlook' | 'teams'
+                item_id      TEXT NOT NULL,   -- id estável (InternetMessageID / chat msg id)
+                item_date    TEXT,            -- data do email/mensagem
+                processed_at TEXT,            -- quando foi processado
+                note_path    TEXT,            -- nota gerada no vault
+                status       TEXT,            -- 'ok' | 'error'
+                PRIMARY KEY (source, item_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_processed_date ON processed_items (source, item_date);
             """
         )
+
+
+# ── Registro de itens processados (dedup entre email/Teams) ──────────────────────
+
+def is_processed(source: str, item_id: str) -> bool:
+    if not item_id:
+        return False
+    with _conn() as c:
+        row = c.execute(
+            "SELECT 1 FROM processed_items WHERE source=? AND item_id=?", (source, item_id)
+        ).fetchone()
+    return row is not None
+
+
+def mark_processed(source: str, item_id: str, item_date: str = "",
+                   note_path: str = "", status: str = "ok") -> None:
+    if not item_id:
+        return
+    import time
+    now_iso = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    with _lock, _conn() as c:
+        c.execute(
+            "INSERT INTO processed_items (source, item_id, item_date, processed_at, note_path, status) "
+            "VALUES (?,?,?,?,?,?) "
+            "ON CONFLICT(source, item_id) DO UPDATE SET processed_at=excluded.processed_at, "
+            "note_path=excluded.note_path, status=excluded.status",
+            (source, item_id, item_date, now_iso, note_path, status),
+        )
+
+
+def processed_ids(source: str, since: str = None) -> list:
+    """IDs já processados de uma fonte. since (YYYY-MM-DD) limita por item_date."""
+    if since:
+        q = "SELECT item_id FROM processed_items WHERE source=? AND (item_date IS NULL OR substr(item_date,1,10) >= ?)"
+        params = (source, since[:10])
+    else:
+        q = "SELECT item_id FROM processed_items WHERE source=?"
+        params = (source,)
+    with _conn() as c:
+        rows = c.execute(q, params).fetchall()
+    return [r["item_id"] for r in rows]
 
 
 # ── Registro de atividade (linha do tempo) ───────────────────────────────────────

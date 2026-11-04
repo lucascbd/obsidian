@@ -16,6 +16,8 @@ _lock = threading.Lock()
 _DEFAULTS = {
     "model": os.environ.get("ANTHROPIC_MODEL", "sonnet"),
     "reindex_times": [],   # ["03:00", "15:00"] — horários HH:MM (hora local do container)
+    "poll_seconds": int(os.environ.get("POLL_SECONDS", "300")),   # intervalo do coletor
+    "backfill_days": 0,    # varredura inicial do coletor (dias)
 }
 
 _VALID_MODELS = {"sonnet", "opus", "haiku"}
@@ -43,6 +45,16 @@ def save_settings(patch: dict) -> dict:
             data["model"] = patch["model"]
         if "reindex_times" in patch and isinstance(patch["reindex_times"], list):
             data["reindex_times"] = sorted({t for t in patch["reindex_times"] if _valid_time(t)})
+        if "poll_seconds" in patch:
+            try:
+                data["poll_seconds"] = max(30, min(int(patch["poll_seconds"]), 86400))
+            except Exception:
+                pass
+        if "backfill_days" in patch:
+            try:
+                data["backfill_days"] = max(0, min(int(patch["backfill_days"]), 3650))
+            except Exception:
+                pass
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         _SETTINGS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return data
