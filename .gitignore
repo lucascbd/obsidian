@@ -18,3 +18,6 @@ vaults/*
 .DS_Store
 Thumbs.db
 .claude/
+
+# Cache de token do probe do Graph (não commitar)
+scripts/graph_probe_cache.bin
