@@ -694,12 +694,15 @@ def api_ingest_email():
     data = request.get_json(silent=True) or {}
     if not (data.get("subject") or data.get("body")):
         return jsonify({"error": "subject/body obrigatórios"}), 400
-    return jsonify(ingest_email(
+    res = ingest_email(
         subject=data.get("subject", ""), sender=data.get("from", ""),
         date=data.get("date", ""), body=data.get("body", ""),
         msg_id=data.get("msg_id", ""), web_link=data.get("web_link", ""),
         vault=data.get("vault") or None,
-    ))
+    )
+    if res.get("retry"):
+        return jsonify(res), 429   # limite de uso do LLM: o coletor deve pausar e retomar
+    return jsonify(res)
 
 
 @app.route("/api/rebuild-indices", methods=["POST"])

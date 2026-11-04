@@ -13,6 +13,8 @@ CONFIGURAÇÃO (variáveis de ambiente):
     AGENT_API_KEY   a mesma chave configurada no agente     (obrigatório)
     POLL_SECONDS    intervalo entre ciclos (padrão 300)
     MAX_PER_RUN     máx. de emails por ciclo (padrão 10)
+    BACKFILL_DAYS   varredura inicial p/ trás, em dias (0 = só daqui pra frente; 120 = ~4 meses)
+    RATELIMIT_PAUSE pausa quando o LLM bate o limite de uso, em seg. (padrão 1800)
 
 USO:
     pip install pywin32 requests truststore
@@ -46,6 +48,11 @@ AGENT_URL    = os.environ.get("AGENT_URL", "").rstrip("/")
 AGENT_API_KEY = os.environ.get("AGENT_API_KEY", "")
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "300"))
 MAX_PER_RUN  = int(os.environ.get("MAX_PER_RUN", "10"))
+# Varredura inicial: quantos dias para trás processar na primeira execução
+# (0 = só daqui pra frente; 120 = ~4 meses). Depois é só incremental.
+BACKFILL_DAYS   = int(os.environ.get("BACKFILL_DAYS", "0"))
+# Pausa quando o agente sinaliza limite de uso do LLM (429). Padrão 30 min.
+RATELIMIT_PAUSE = int(os.environ.get("RATELIMIT_PAUSE", "1800"))
 
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outlook_collector_state.json")
 OL_INBOX   = 6
@@ -57,8 +64,9 @@ def _load_state() -> dict:
     try:
         return json.load(open(STATE_FILE, "r", encoding="utf-8"))
     except Exception:
-        # Primeira execução: só processa emails recebidos daqui pra frente.
-        return {"start_iso": datetime.datetime.now().isoformat(), "processed": []}
+        # Primeira execução: janela = agora - BACKFILL_DAYS (0 = só daqui pra frente).
+        start = datetime.datetime.now() - datetime.timedelta(days=BACKFILL_DAYS)
+        return {"start_iso": start.isoformat(), "processed": []}
 
 
 def _save_state(st: dict) -> None:
@@ -75,17 +83,20 @@ def _inbox():
     return ns.GetDefaultFolder(OL_INBOX)
 
 
-def _send(payload: dict) -> bool:
+def _send(payload: dict) -> str:
+    """Retorna 'ok', 'ratelimit' (429 = limite de uso do LLM) ou 'error'."""
     r = requests.post(
         f"{AGENT_URL}/api/ingest-email",
         json=payload,
         headers={"X-Api-Key": AGENT_API_KEY, "Content-Type": "application/json"},
-        timeout=120,
+        timeout=180,
     )
     if r.status_code == 200:
-        return True
+        return "ok"
+    if r.status_code == 429:
+        return "ratelimit"
     print(f"  ❌ agente respondeu {r.status_code}: {r.text[:200]}")
-    return False
+    return "error"
 
 
 def _cycle(state: dict):
@@ -123,7 +134,10 @@ def _cycle(state: dict):
     novos.reverse()  # processa do mais antigo p/ o mais novo
     if not novos:
         print("  nenhum email novo (aguardando próximo ciclo).")
-        return
+        return "idle"
+
+    restantes = len(novos)
+    print(f"  {restantes} email(s) na fila (processando até {MAX_PER_RUN} agora).")
 
     for item, mid, received in novos[:MAX_PER_RUN]:
         subject = getattr(item, "Subject", "") or "(sem assunto)"
@@ -136,16 +150,25 @@ def _cycle(state: dict):
             "body": body,
             "msg_id": mid,
         }
-        print(f"  → enviando: {received:%Y-%m-%d %H:%M} [{sender}] {subject[:60]}")
+        print(f"  → {received:%Y-%m-%d %H:%M} [{sender}] {subject[:55]}")
         try:
-            if _send(payload):
-                processed.add(mid)
-                state["processed"].append(mid)
-                print("    ✅ ok")
+            r = _send(payload)
         except Exception as e:
-            print("    ❌ falha de rede:", e)
+            print("    ❌ falha de rede (tenta de novo depois):", e)
+            continue  # não marca: reprocessa no próximo ciclo
+        if r == "ratelimit":
+            print(f"    ⏸ limite de uso do LLM. Pausando ~{RATELIMIT_PAUSE//60} min e retomando deste ponto.")
+            _save_state(state)
+            return "ratelimit"   # NÃO marca este email: ele é o próximo quando retomar
+        # 'ok' ou 'error': marca como processado (erro não-limite não deve travar a fila)
+        processed.add(mid)
+        state["processed"].append(mid)
+        _save_state(state)       # persiste a CADA email → retomável no ponto exato
+        print("    ✅ ok" if r == "ok" else "    ⚠ pulado (erro não-limite)")
 
-    _save_state(state)
+    if restantes > MAX_PER_RUN:
+        print(f"  … ainda {restantes - MAX_PER_RUN} na fila; continua no próximo ciclo.")
+    return "ok"
 
 
 def main():
@@ -156,7 +179,10 @@ def main():
         sys.exit(1)
 
     print(f"Coletor de email iniciado. Agente: {AGENT_URL}  | ciclo: {POLL_SECONDS}s")
-    print("Processa apenas emails recebidos a partir de agora. Ctrl+C para parar.\n")
+    if BACKFILL_DAYS > 0:
+        print(f"Varredura inicial: últimos {BACKFILL_DAYS} dias (resumível). Ctrl+C para parar — retoma no mesmo ponto.\n")
+    else:
+        print("Processa apenas emails recebidos a partir de agora. Ctrl+C para parar.\n")
 
     # Teste de conexão com o agente (reachability + TLS).
     try:
@@ -169,12 +195,15 @@ def main():
     _save_state(state)  # fixa start_iso na 1ª vez
 
     while True:
+        result = "ok"
         try:
-            print(f"[{datetime.datetime.now():%H:%M:%S}] verificando novos emails…")
-            _cycle(state)
+            print(f"[{datetime.datetime.now():%H:%M:%S}] verificando emails…")
+            result = _cycle(state)
         except Exception as e:
             print("  ⚠ erro no ciclo:", e)
-        time.sleep(POLL_SECONDS)
+        # Se bateu o limite do LLM, espera mais tempo (janela do Pro renovar); senão o ciclo normal.
+        wait = RATELIMIT_PAUSE if result == "ratelimit" else POLL_SECONDS
+        time.sleep(wait)
 
 
 if __name__ == "__main__":

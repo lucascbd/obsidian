@@ -22,6 +22,20 @@ os.environ.pop("ANTHROPIC_API_KEY", None)
 MAX_TURNS = int(os.environ.get("AGENT_MAX_TURNS", 40))
 
 
+class LLMRateLimited(Exception):
+    """O LLM (assinatura Pro) atingiu o limite de uso — a chamada deve ser retomada depois."""
+
+
+_RATE_KEYS = ("rate limit", "rate_limit", "ratelimit", "429", "usage limit",
+              "usage_limit", "quota", "exceeded", "overloaded", "resource_exhausted",
+              "too many requests", "limit reached", "try again later")
+
+
+def _is_rate_limit(msg: str) -> bool:
+    m = (msg or "").lower()
+    return any(k in m for k in _RATE_KEYS)
+
+
 def current_model() -> str:
     """Modelo escolhido nas settings (fallback para o env/padrão)."""
     try:
@@ -228,9 +242,13 @@ async def _complete_async(system: str, user: str) -> str:
 
 
 def complete(system: str, user: str) -> str:
-    """Chamada única (sem ferramentas) — redação/geração. Retorna texto."""
+    """Chamada única (sem ferramentas) — redação/geração. Retorna texto.
+    Levanta LLMRateLimited se o limite de uso do Pro for atingido (para retomar depois)."""
     try:
         return asyncio.run(_complete_async(system, user))
     except Exception as e:
+        if _is_rate_limit(str(e)):
+            log.warning(f"[sdk] limite de uso atingido: {e}")
+            raise LLMRateLimited(str(e))
         log.error(f"[sdk] erro no complete: {e}")
         return f"Erro ao chamar o LLM (Claude Agent SDK): {e}"

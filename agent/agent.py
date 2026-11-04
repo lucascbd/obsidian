@@ -765,7 +765,11 @@ def ingest_email(subject: str, sender: str, date: str, body: str,
         f"Data: {date}\n\n"
         f"{body}"
     )
-    res = ingest(raw, source_name=f"email: {subject or '(sem assunto)'}", vault=vault, db=db)
+    try:
+        res = ingest(raw, source_name=f"email: {subject or '(sem assunto)'}", vault=vault, db=db)
+    except sdk_llm.LLMRateLimited:
+        return {"answer": "Limite de uso do LLM atingido — retome mais tarde.",
+                "sources": [], "retry": True}
     path = res.get("path")
     if path:
         _inject_frontmatter_keys(_vault(db), path, {
