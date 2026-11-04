@@ -8,8 +8,13 @@ o SEU próprio acesso. Não cria app, não envia nada pra lugar nenhum — só l
 imprime na tela se o tenant permite você autenticar e ler email/Teams.
 
 USO:
-    pip install msal requests
+    pip install msal requests truststore
     python graph_probe.py
+
+OBS (rede corporativa): empresas costumam inspecionar TLS (MITM) com uma CA
+própria. O Windows confia nela, mas o Python não — daí o erro
+CERTIFICATE_VERIFY_FAILED. O pacote `truststore` faz o Python usar o trust store
+do Windows (que já tem a CA da empresa), resolvendo isso.
 
 Vai aparecer uma URL + um código: abra no navegador, entre com a conta do
 trabalho e autorize. O script então testa /me, 5 emails e 1 chat do Teams.
@@ -22,11 +27,21 @@ import os
 import sys
 import json
 
+# Rede corporativa inspeciona TLS com CA própria → faz o Python usar o trust
+# store do Windows (que confia nessa CA). Precisa rodar ANTES de abrir conexões.
+_TRUSTSTORE = False
+try:
+    import truststore
+    truststore.inject_into_ssl()
+    _TRUSTSTORE = True
+except Exception:
+    pass
+
 try:
     import msal
     import requests
 except ImportError:
-    print("Faltam dependências. Rode:  pip install msal requests")
+    print("Faltam dependências. Rode:  pip install msal requests truststore")
     sys.exit(1)
 
 # Client público da Microsoft (Microsoft Graph Command Line Tools). NÃO é um app seu.
@@ -142,4 +157,19 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        if "CERTIFICATE_VERIFY_FAILED" in str(e) or "unable to get local issuer" in str(e):
+            print("\n❌ Erro de certificado TLS (inspeção da rede corporativa).")
+            if not _TRUSTSTORE:
+                print("   O pacote 'truststore' não está instalado. Rode:")
+                print("       pip install truststore")
+                print("   e execute de novo (ele faz o Python confiar na CA da empresa).")
+            else:
+                print("   'truststore' está instalado mas não resolveu. Alternativa manual:")
+                print("   peça ao TI o arquivo .pem da CA raiz da empresa e rode antes:")
+                print('       set REQUESTS_CA_BUNDLE=C:\\caminho\\ca-empresa.pem')
+                print("   (ou SSL_CERT_FILE) apontando pra esse arquivo.")
+        else:
+            raise
