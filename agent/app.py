@@ -113,8 +113,8 @@ HTML = """<!DOCTYPE html>
   .modal .field{display:flex;flex-direction:column;gap:6px}
   .modal label{font-size:12px;color:var(--label);font-weight:500}
   .modal .hint{font-size:11px;color:var(--muted);line-height:1.5}
-  .modal select,.modal input[type=text],.modal input[type=time]{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:9px 11px;color:var(--text);font-size:13px;font-family:'Inter',sans-serif;outline:none}
-  .modal select:focus,.modal input:focus{border-color:var(--accent)}
+  .modal select,.modal input[type=text],.modal input[type=time],.modal textarea{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:9px 11px;color:var(--text);font-size:13px;font-family:'Inter',sans-serif;outline:none;resize:vertical}
+  .modal select:focus,.modal input:focus,.modal textarea:focus{border-color:var(--accent)}
   .sec{border-top:1px solid var(--border);padding-top:12px;display:flex;flex-direction:column;gap:10px}
   .sec-title{font-size:11px;letter-spacing:.6px;text-transform:uppercase;color:var(--muted)}
   .times{display:flex;flex-wrap:wrap;gap:6px}
@@ -202,6 +202,12 @@ HTML = """<!DOCTYPE html>
       <label>Coletor — intervalo de verificação (segundos)</label>
       <input type="text" id="set-poll" placeholder="300">
       <div class="hint">De quanto em quanto tempo o coletor de email busca mensagens novas. Padrão 300 (5 min). Mínimo 30.</div>
+    </div>
+
+    <div class="field">
+      <label>Filtro do coletor — ignorar (um por linha)</label>
+      <textarea id="set-skip" rows="4" placeholder="trecho de remetente ou assunto, ex:&#10;newsletter&#10;iqviafan@iqvia.com&#10;promo"></textarea>
+      <div class="hint">Emails cujo remetente ou assunto contenham qualquer um destes trechos são ignorados (sem gastar LLM). Vazio = processa tudo. RH, learning, convites e reuniões passam a menos que você os adicione aqui.</div>
     </div>
 
     <div class="sec">
@@ -320,13 +326,14 @@ HTML = """<!DOCTYPE html>
   function addTime(){var t=document.getElementById('new-time').value;if(t&&_times.indexOf(t)<0){_times.push(t);_times.sort();renderTimes();}}
   function rmTime(i){_times.splice(i,1);renderTimes();}
   async function openSettings(){
-    try{var r=await fetch('/api/settings');var d=await r.json();document.getElementById('set-model').value=d.model||'sonnet';document.getElementById('set-poll').value=d.poll_seconds||300;_times=(d.reindex_times||[]).slice();}
+    try{var r=await fetch('/api/settings');var d=await r.json();document.getElementById('set-model').value=d.model||'sonnet';document.getElementById('set-poll').value=d.poll_seconds||300;document.getElementById('set-skip').value=(d.skip_patterns||[]).join('\\n');_times=(d.reindex_times||[]).slice();}
     catch(e){_times=[];}
     renderTimes();document.getElementById('settings-modal').classList.add('open');
   }
   function closeSettings(){document.getElementById('settings-modal').classList.remove('open');}
   async function saveSettings(){
-    var body={model:document.getElementById('set-model').value,reindex_times:_times,poll_seconds:parseInt(document.getElementById('set-poll').value)||300};
+    var skip=document.getElementById('set-skip').value.split('\\n').map(function(s){return s.trim();}).filter(function(s){return s;});
+    var body={model:document.getElementById('set-model').value,reindex_times:_times,poll_seconds:parseInt(document.getElementById('set-poll').value)||300,skip_patterns:skip};
     try{await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});}catch(e){}
     closeSettings();appendMsg('agent','⚙️ Configurações salvas. Modelo: '+body.model+(body.reindex_times.length?(' · reindex: '+body.reindex_times.join(', ')):''));
   }
@@ -720,7 +727,8 @@ def api_collector_config():
         return err
     s = app_settings.get_settings()
     return jsonify({"poll_seconds": s.get("poll_seconds", 300),
-                    "backfill_days": s.get("backfill_days", 0)})
+                    "backfill_days": s.get("backfill_days", 0),
+                    "skip_patterns": s.get("skip_patterns", [])})
 
 
 @app.route("/api/ingest-email", methods=["POST"])

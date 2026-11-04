@@ -67,20 +67,28 @@ def _inbox():
 
 
 def _config() -> dict:
-    """Lê intervalo/backfill do agente; env tem prioridade quando definido."""
-    poll, backfill = 300, 0
+    """Lê intervalo/backfill/filtro do agente; env tem prioridade quando definido."""
+    poll, backfill, skip = 300, 0, []
     try:
         r = requests.get(f"{AGENT_URL}/api/collector-config", headers=HEADERS, timeout=30)
         if r.status_code == 200:
             d = r.json()
             poll, backfill = int(d.get("poll_seconds", 300)), int(d.get("backfill_days", 0))
+            skip = [str(p).lower() for p in d.get("skip_patterns", [])]
     except Exception:
         pass
     if _ENV_POLL:
         poll = int(_ENV_POLL)
     if _ENV_BACKFILL:
         backfill = int(_ENV_BACKFILL)
-    return {"poll": max(30, poll), "backfill": max(0, backfill)}
+    return {"poll": max(30, poll), "backfill": max(0, backfill), "skip": skip}
+
+
+def _skip(sender: str, subject: str, patterns: list) -> bool:
+    if not patterns:
+        return False
+    hay = f"{sender} {subject}".lower()
+    return any(p in hay for p in patterns)
 
 
 def _processed_ids(since_date: str) -> set:
@@ -106,9 +114,11 @@ def _send(payload: dict) -> str:
     return "error"
 
 
-def _cycle(backfill_days: int) -> str:
-    window = datetime.datetime.now() - datetime.timedelta(days=backfill_days)
+def _cycle(cfg: dict) -> str:
+    window = datetime.datetime.now() - datetime.timedelta(days=cfg["backfill"])
     done = _processed_ids(window.strftime("%Y-%m-%d"))
+    patterns = cfg.get("skip", [])
+    skipped = 0
 
     try:
         items = _inbox().Items
@@ -135,12 +145,19 @@ def _cycle(backfill_days: int) -> str:
         mid = getattr(item, "InternetMessageID", "") or getattr(item, "EntryID", "")
         if not mid or mid in done:
             continue
+        sender = getattr(item, "SenderName", "") or getattr(item, "SenderEmailAddress", "") or ""
+        subject = getattr(item, "Subject", "") or ""
+        if _skip(sender, subject, patterns):
+            skipped += 1
+            continue
         novos.append((item, mid, received))
 
     novos.reverse()  # mais antigo primeiro
     if not novos:
-        print("  nenhum email novo.")
+        print(f"  nenhum email novo." + (f" ({skipped} ignorado(s) pelo filtro)" if skipped else ""))
         return "idle"
+    if skipped:
+        print(f"  ({skipped} ignorado(s) pelo filtro)")
 
     print(f"  {len(novos)} email(s) na fila (processando até {MAX_PER_RUN}).")
     for item, mid, received in novos[:MAX_PER_RUN]:
@@ -189,7 +206,7 @@ def main():
         try:
             cfg = _config()   # relê o intervalo a cada ciclo (editável nas Settings)
             print(f"[{datetime.datetime.now():%H:%M:%S}] verificando emails… (intervalo {cfg['poll']}s)")
-            result = _cycle(cfg["backfill"])
+            result = _cycle(cfg)
         except Exception as e:
             print("  ⚠ erro no ciclo:", e)
         time.sleep(RATELIMIT_PAUSE if result == "ratelimit" else cfg["poll"])

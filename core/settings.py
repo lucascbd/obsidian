@@ -18,6 +18,10 @@ _DEFAULTS = {
     "reindex_times": [],   # ["03:00", "15:00"] — horários HH:MM (hora local do container)
     "poll_seconds": int(os.environ.get("POLL_SECONDS", "300")),   # intervalo do coletor
     "backfill_days": 0,    # varredura inicial do coletor (dias)
+    # Filtro de ruído do coletor: trechos (remetente ou assunto) a IGNORAR.
+    # Vazio = processa tudo. Curado por você — RH/learning/reuniões passam a menos
+    # que você adicione aqui.
+    "skip_patterns": [],
 }
 
 _VALID_MODELS = {"sonnet", "opus", "haiku"}
@@ -55,6 +59,9 @@ def save_settings(patch: dict) -> dict:
                 data["backfill_days"] = max(0, min(int(patch["backfill_days"]), 3650))
             except Exception:
                 pass
+        if "skip_patterns" in patch and isinstance(patch["skip_patterns"], list):
+            data["skip_patterns"] = [str(p).strip().lower() for p in patch["skip_patterns"]
+                                     if str(p).strip()][:200]
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         _SETTINGS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return data
