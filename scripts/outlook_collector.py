@@ -122,6 +122,7 @@ def _cycle(state: dict):
 
     novos.reverse()  # processa do mais antigo p/ o mais novo
     if not novos:
+        print("  nenhum email novo (aguardando próximo ciclo).")
         return
 
     for item, mid, received in novos[:MAX_PER_RUN]:
@@ -156,6 +157,14 @@ def main():
 
     print(f"Coletor de email iniciado. Agente: {AGENT_URL}  | ciclo: {POLL_SECONDS}s")
     print("Processa apenas emails recebidos a partir de agora. Ctrl+C para parar.\n")
+
+    # Teste de conexão com o agente (reachability + TLS).
+    try:
+        h = requests.get(f"{AGENT_URL}/health", timeout=15)
+        print(f"Conexão com o agente: {'OK' if h.status_code == 200 else 'resposta ' + str(h.status_code)}\n")
+    except Exception as e:
+        print(f"⚠ Não consegui falar com o agente ({AGENT_URL}): {e}")
+        print("  Confira a URL, se o agente está exposto e o TLS. Vou tentar mesmo assim.\n")
     state = _load_state()
     _save_state(state)  # fixa start_iso na 1ª vez
 
