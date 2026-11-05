@@ -49,7 +49,7 @@ except ImportError:
 
 AGENT_URL       = os.environ.get("AGENT_URL", "").rstrip("/")
 AGENT_API_KEY   = os.environ.get("AGENT_API_KEY", "")
-MAX_PER_RUN     = int(os.environ.get("MAX_PER_RUN", "10"))
+MAX_PER_RUN     = int(os.environ.get("MAX_PER_RUN", "100"))  # enfileirar é barato (async no agente)
 RATELIMIT_PAUSE = int(os.environ.get("RATELIMIT_PAUSE", "1800"))
 _ENV_POLL       = os.environ.get("POLL_SECONDS")       # sobrepõe a config do agente
 _ENV_BACKFILL   = os.environ.get("BACKFILL_DAYS")      # sobrepõe a config do agente
@@ -104,13 +104,11 @@ def _processed_ids(since_date: str) -> set:
 
 
 def _send(payload: dict) -> str:
-    """'ok' | 'ratelimit' | 'error'."""
-    r = requests.post(f"{AGENT_URL}/api/ingest-email", json=payload, headers=HEADERS, timeout=180)
-    if r.status_code == 200:
+    """'ok' | 'error'. O agente só ENFILEIRA (202) — a destilação é assíncrona no servidor."""
+    r = requests.post(f"{AGENT_URL}/api/ingest-email", json=payload, headers=HEADERS, timeout=60)
+    if 200 <= r.status_code < 300:
         return "ok"
-    if r.status_code == 429:
-        return "ratelimit"
-    print(f"  ❌ agente respondeu {r.status_code}: {r.text[:200]}")
+    print(f"  ❌ agente respondeu {r.status_code}: {r.text[:150]}")
     return "error"
 
 
@@ -170,15 +168,12 @@ def _cycle(cfg: dict) -> str:
         try:
             r = _send(payload)
         except Exception as e:
-            print("    ❌ falha de rede (retoma depois):", e)
-            return "idle"  # tenta tudo de novo no próximo ciclo
-        if r == "ratelimit":
-            print(f"    ⏸ limite de uso do LLM. Pausando ~{RATELIMIT_PAUSE // 60} min e retomando daqui.")
-            return "ratelimit"
-        print("    ✅ ok" if r == "ok" else "    ⚠ erro (registrado; não reprocessa).")
+            print("    ❌ falha de rede (retoma no próximo ciclo):", e)
+            continue  # idempotente no agente; reenvio é seguro
+        print("    ✅ enfileirado" if r == "ok" else "    ⚠ não enfileirado (tenta de novo depois)")
 
     if len(novos) > MAX_PER_RUN:
-        print(f"  … ainda {len(novos) - MAX_PER_RUN} na fila; continua no próximo ciclo.")
+        print(f"  … ainda {len(novos) - MAX_PER_RUN} p/ enfileirar; continua no próximo ciclo.")
     return "ok"
 
 

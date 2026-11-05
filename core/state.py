@@ -79,20 +79,78 @@ def init_db() -> None:
                 PRIMARY KEY (source, item_id)
             );
             CREATE INDEX IF NOT EXISTS idx_processed_date ON processed_items (source, item_date);
+            CREATE TABLE IF NOT EXISTS ingest_queue (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                source     TEXT NOT NULL,
+                item_id    TEXT,
+                payload    TEXT NOT NULL,   -- JSON do email/mensagem
+                created_at TEXT,
+                attempts   INTEGER DEFAULT 0
+            );
             """
         )
 
 
 # ── Registro de itens processados (dedup entre email/Teams) ──────────────────────
 
+# Status considerados "resolvidos" (não reprocessar). 'error' fica de fora de
+# propósito: itens marcados com erro transitório (ex.: timeout 524) são retomados.
+_DONE_STATUSES = ("ok", "pending", "skip")
+
+
 def is_processed(source: str, item_id: str) -> bool:
+    """True se o item já foi resolvido (ok/pending/skip) — não deve ser reenfileirado."""
     if not item_id:
         return False
     with _conn() as c:
         row = c.execute(
-            "SELECT 1 FROM processed_items WHERE source=? AND item_id=?", (source, item_id)
+            "SELECT status FROM processed_items WHERE source=? AND item_id=?", (source, item_id)
         ).fetchone()
-    return row is not None
+    return row is not None and row["status"] in _DONE_STATUSES
+
+
+# ── Fila de ingestão (processamento assíncrono pelo worker do agente) ────────────
+
+def enqueue(source: str, item_id: str, payload: dict) -> None:
+    import time, json as _json
+    now_iso = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    with _lock, _conn() as c:
+        c.execute(
+            "INSERT INTO ingest_queue (source, item_id, payload, created_at, attempts) VALUES (?,?,?,?,0)",
+            (source, item_id, _json.dumps(payload, ensure_ascii=False), now_iso),
+        )
+
+
+def queue_peek():
+    """Item mais antigo da fila, ou None. Retorna dict {id, source, item_id, payload(dict), attempts}."""
+    import json as _json
+    with _conn() as c:
+        row = c.execute(
+            "SELECT id, source, item_id, payload, attempts FROM ingest_queue ORDER BY id ASC LIMIT 1"
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        payload = _json.loads(row["payload"])
+    except Exception:
+        payload = {}
+    return {"id": row["id"], "source": row["source"], "item_id": row["item_id"],
+            "payload": payload, "attempts": row["attempts"]}
+
+
+def queue_delete(qid: int) -> None:
+    with _lock, _conn() as c:
+        c.execute("DELETE FROM ingest_queue WHERE id=?", (qid,))
+
+
+def queue_bump(qid: int) -> None:
+    with _lock, _conn() as c:
+        c.execute("UPDATE ingest_queue SET attempts = attempts + 1 WHERE id=?", (qid,))
+
+
+def queue_len() -> int:
+    with _conn() as c:
+        return c.execute("SELECT COUNT(*) AS n FROM ingest_queue").fetchone()["n"]
 
 
 def mark_processed(source: str, item_id: str, item_date: str = "",
@@ -113,11 +171,13 @@ def mark_processed(source: str, item_id: str, item_date: str = "",
 
 def processed_ids(source: str, since: str = None) -> list:
     """IDs já processados de uma fonte. since (YYYY-MM-DD) limita por item_date."""
+    done = "('ok','pending','skip')"
     if since:
-        q = "SELECT item_id FROM processed_items WHERE source=? AND (item_date IS NULL OR substr(item_date,1,10) >= ?)"
+        q = (f"SELECT item_id FROM processed_items WHERE source=? AND status IN {done} "
+             "AND (item_date IS NULL OR substr(item_date,1,10) >= ?)")
         params = (source, since[:10])
     else:
-        q = "SELECT item_id FROM processed_items WHERE source=?"
+        q = f"SELECT item_id FROM processed_items WHERE source=? AND status IN {done}"
         params = (source,)
     with _conn() as c:
         rows = c.execute(q, params).fetchall()

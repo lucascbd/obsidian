@@ -758,24 +758,29 @@ def ingest_email(subject: str, sender: str, date: str, body: str,
                  db: str = None) -> dict:
     """Destila um email em nota do vault (conhecimento destilado + ponteiro p/ a fonte).
     Reaproveita o pipeline de ingestão (LLM distila → nota → auto-link → watcher indexa)."""
-    db = db or vault
-
-    # Idempotente: se já processamos este email, não destila de novo.
+    # Enfileira para processamento assíncrono (resposta rápida; sem timeout de proxy).
     if msg_id and state.is_processed("outlook", msg_id):
-        return {"answer": "(email já processado)", "sources": [], "skipped": True}
+        return {"queued": False, "skipped": True, "answer": "(email já processado)"}
+    payload = {"subject": subject, "sender": sender, "date": date, "body": body,
+               "msg_id": msg_id, "web_link": web_link, "vault": vault or db}
+    state.enqueue("outlook", msg_id, payload)
+    if msg_id:
+        state.mark_processed("outlook", msg_id, item_date=date, status="pending")
+    return {"queued": True, "answer": "enfileirado"}
 
+
+def process_email_payload(subject: str = "", sender: str = "", date: str = "", body: str = "",
+                          msg_id: str = "", web_link: str = "", vault: Optional[str] = None,
+                          db: str = None) -> dict:
+    """Destila de fato um email (chamado pelo worker). Pode levantar LLMRateLimited."""
+    db = db or vault
     raw = (
         f"Assunto: {subject}\n"
         f"De: {sender}\n"
         f"Data: {date}\n\n"
         f"{body}"
     )
-    try:
-        res = ingest(raw, source_name=f"email: {subject or '(sem assunto)'}", vault=vault, db=db)
-    except sdk_llm.LLMRateLimited:
-        # Não registra como processado → será retomado quando a janela do Pro renovar.
-        return {"answer": "Limite de uso do LLM atingido — retome mais tarde.",
-                "sources": [], "retry": True}
+    res = ingest(raw, source_name=f"email: {subject or '(sem assunto)'}", vault=vault, db=db)
     path = res.get("path")
     if path:
         _inject_frontmatter_keys(_vault(db), path, {
@@ -788,11 +793,7 @@ def ingest_email(subject: str, sender: str, date: str, body: str,
         state.record_event(_vault(db), actor="agent", kind="email",
                            summary=f"Email de {sender}: {subject}"[:200],
                            source="outlook", ref=msg_id or path)
-        state.mark_processed("outlook", msg_id, item_date=date, note_path=path, status="ok")
-    else:
-        # Falha não-transitória de destilação: marca como erro p/ não reprocessar eternamente.
-        state.mark_processed("outlook", msg_id, item_date=date, status="error")
-    return res
+    return {"path": path, "answer": res.get("answer", ""), "sources": res.get("sources", [])}
 
 
 def ingest_file(filename: str, content: bytes, vault: Optional[str] = None, db: str = None) -> dict:

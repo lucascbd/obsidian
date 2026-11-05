@@ -9,7 +9,7 @@ import logging
 import threading
 from flask import Flask, request, jsonify, render_template_string, Response, stream_with_context
 from flask_cors import CORS
-from agent import ask, weekly_summary, summarize_meeting, vault_review, normalize_tags, purge_vault, ingest_file, ingest_url, ingest_zip, get_vaults, stop_agent, reset_stop, tool_read_note, reindex_vault, rebuild_indices, obsidian_maintenance, generate_output, ingest_email
+from agent import ask, weekly_summary, summarize_meeting, vault_review, normalize_tags, purge_vault, ingest_file, ingest_url, ingest_zip, get_vaults, stop_agent, reset_stop, tool_read_note, reindex_vault, rebuild_indices, obsidian_maintenance, generate_output, ingest_email, process_email_payload
 from core import vault_fs
 from core import settings as app_settings
 
@@ -739,15 +739,23 @@ def api_ingest_email():
     data = request.get_json(silent=True) or {}
     if not (data.get("subject") or data.get("body")):
         return jsonify({"error": "subject/body obrigatórios"}), 400
+    # Apenas enfileira (rápido) — o worker destila em background, sem timeout de proxy.
     res = ingest_email(
         subject=data.get("subject", ""), sender=data.get("from", ""),
         date=data.get("date", ""), body=data.get("body", ""),
         msg_id=data.get("msg_id", ""), web_link=data.get("web_link", ""),
         vault=data.get("vault") or None,
     )
-    if res.get("retry"):
-        return jsonify(res), 429   # limite de uso do LLM: o coletor deve pausar e retomar
-    return jsonify(res)
+    return jsonify(res), 202
+
+
+@app.route("/api/queue", methods=["GET"])
+def api_queue():
+    ok, err = _machine_auth()
+    if not ok:
+        return err
+    from core import state
+    return jsonify({"pending": state.queue_len()})
 
 
 @app.route("/api/rebuild-indices", methods=["POST"])
@@ -806,7 +814,58 @@ def _start_scheduler():
     log.info("[indices-scheduler] iniciado")
 
 
+# ── Worker de ingestão assíncrona (destila a fila de emails/mensagens) ───────────
+import agent as _agent_mod
+
+WORKER_PAUSE        = int(os.environ.get("AGENT_WORKER_PAUSE", "1800"))  # pausa no limite do LLM
+WORKER_MAX_ATTEMPTS = int(os.environ.get("AGENT_WORKER_MAX_ATTEMPTS", "3"))
+
+
+def _ingest_worker():
+    import time as _t
+    from core import state
+    while True:
+        try:
+            item = state.queue_peek()
+            if not item:
+                _t.sleep(3)
+                continue
+            p = item["payload"]
+            try:
+                r = process_email_payload(**p)
+            except _agent_mod.sdk_llm.LLMRateLimited:
+                log.warning(f"[worker] limite de uso do LLM — pausando {WORKER_PAUSE // 60} min (item fica na fila)")
+                _t.sleep(WORKER_PAUSE)
+                continue
+            except Exception as e:
+                state.queue_bump(item["id"])
+                if item["attempts"] + 1 >= WORKER_MAX_ATTEMPTS:
+                    state.mark_processed("outlook", item["item_id"],
+                                         item_date=p.get("date", ""), status="skip")
+                    state.queue_delete(item["id"])
+                    log.error(f"[worker] desistindo de {item['item_id']} após {WORKER_MAX_ATTEMPTS} tentativas: {e}")
+                else:
+                    log.warning(f"[worker] erro (tentativa {item['attempts'] + 1}): {e}")
+                    _t.sleep(5)
+                continue
+            path = r.get("path")
+            state.mark_processed("outlook", item["item_id"], item_date=p.get("date", ""),
+                                 note_path=path or "", status="ok" if path else "skip")
+            state.queue_delete(item["id"])
+            log.info(f"[worker] processado {item['item_id']} — {path or '(sem nota)'}  | fila: {state.queue_len()}")
+        except Exception as e:
+            log.error(f"[worker] erro no loop: {e}")
+            _t.sleep(5)
+
+
+def _start_worker():
+    t = threading.Thread(target=_ingest_worker, daemon=True, name="ingest-worker")
+    t.start()
+    log.info("[ingest-worker] iniciado")
+
+
 _start_scheduler()
+_start_worker()
 
 
 if __name__ == "__main__":
