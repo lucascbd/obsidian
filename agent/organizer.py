@@ -15,6 +15,7 @@ import unicodedata
 import datetime
 
 from core import vault_fs
+from core.config import is_meta
 from core.text import parse_frontmatter
 
 log = logging.getLogger(__name__)
