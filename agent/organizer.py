@@ -203,8 +203,15 @@ def _compute_moves(vault: str, cats: list, instr: str, use_llm: bool, limit: int
     data = col.get(include=["embeddings", "metadatas"])
     names, mat = _vectors(cats)
 
+    embs = data.get("embeddings")
+    metas = data.get("metadatas")
+    if embs is None:
+        embs = []
+    if metas is None:
+        metas = []
+
     note_vec, note_meta = {}, {}
-    for emb, meta in zip(data.get("embeddings") or [], data.get("metadatas") or []):
+    for emb, meta in zip(embs, metas):
         nid = meta.get("note_id", "")
         if not nid or is_meta(nid) or nid in note_vec:
             continue
