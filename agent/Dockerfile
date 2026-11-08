@@ -18,7 +18,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN python -c "from fastembed import TextEmbedding; TextEmbedding('intfloat/multilingual-e5-large')"
 
 COPY core/ ./core/
-COPY agent/agent.py agent/app.py agent/sdk_llm.py ./
+COPY agent/agent.py agent/app.py agent/sdk_llm.py agent/organizer.py ./
 
 EXPOSE 8090
 
