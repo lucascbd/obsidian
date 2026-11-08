@@ -118,12 +118,13 @@ def _llm_tiebreak(title, summary, note_text, candidates, instructions) -> str:
     return ""
 
 
-def classify(note_text: str, title: str, summary: str, instructions: str, cats: list) -> str:
-    """Categoria da nota: Chroma faz o atalho; LLM só desempata."""
+def classify(note_text: str, title: str, summary: str, instructions: str, cats: list,
+             use_llm: bool = True) -> str:
+    """Categoria da nota: Chroma faz o atalho; LLM só desempata (se use_llm)."""
     sl = shortlist(f"{title} {summary} {note_text}", cats)
     if not sl:
         return "others" if "others" in cats else (cats[0] if cats else "others")
-    if len(sl) == 1 or (sl[0][1] - sl[1][1]) >= MARGIN:
+    if not use_llm or len(sl) == 1 or (sl[0][1] - sl[1][1]) >= MARGIN:
         return sl[0][0]
     cand = [c for c, _ in sl]
     return _llm_tiebreak(title, summary, note_text, cand, instructions) or sl[0][0]
@@ -193,17 +194,23 @@ def _apply_move(vault: str, src: str, dst: str) -> dict:
     return {"from": src, "to": new_id, "links_updated": links}
 
 
-def reorg(vault: str, apply: bool = False, limit: int = 100) -> dict:
+def reorg(vault: str, apply: bool = False, limit: int = 100, scan_limit: int = 600) -> dict:
     """Varre o vault e reorganiza as notas conforme instructions.md.
-    apply=False → simula (lista de moves). apply=True → move + reescreve links."""
+    apply=False → simula (só Chroma, sem LLM; rápido). apply=True → desempata com
+    LLM, move e reescreve os wiki links. scan_limit bounda o tempo por chamada."""
     instr = load_instructions(vault)
     cats = parse_taxonomy(instr) if instr else []
     if not cats:
-        return {"answer": "Sem taxonomia em 00-meta/config/instructions.md — nada a organizar.",
+        return {"answer": "Sem taxonomia em `00-meta/config/instructions.md` — nada a organizar.\n\n"
+                          "Crie esse arquivo com a árvore de categorias sob `knowledge/`.",
                 "moves": [], "sources": []}
 
-    moves = []
+    use_llm = apply   # simulação é só Chroma (grátis e rápida); aplicar desempata com LLM
+    moves, scanned = [], 0
     for nid, path in vault_fs.iter_notes(vault):
+        scanned += 1
+        if scanned > scan_limit:
+            break
         try:
             content = vault_fs.read_path(path)
         except Exception:
@@ -211,7 +218,7 @@ def reorg(vault: str, apply: bool = False, limit: int = 100) -> dict:
         fm = parse_frontmatter(content)
         title = fm.get("title") or nid.split("/")[-1].replace(".md", "")
         date = fm.get("date") or ""
-        cat = classify(content, title, fm.get("source", ""), instr, cats)
+        cat = classify(content, title, fm.get("source", ""), instr, cats, use_llm=use_llm)
         target = build_path(cat, title, date)
         if target.lower() != nid.lower():
             moves.append({"from": nid, "to": target, "category": cat})

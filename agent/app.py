@@ -354,8 +354,10 @@ HTML = """<!DOCTYPE html>
     closeSettings();
     appendMsg('user', apply ? '✅ Organizar vault (aplicar)' : '🗂 Organizar vault (simular)');
     appendTyping(); setBusy(true);
-    try{var r=await fetch('/api/reorg',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vault:getRoot(),apply:apply})});var d=await r.json();removeTyping();appendMsg('agent',d.answer,d.sources);}
-    catch(e){removeTyping();appendMsg('agent','❌ Erro ao organizar.');}
+    try{var r=await fetch('/api/reorg',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vault:getRoot(),apply:apply})});
+      if(!r.ok){var t=await r.text();removeTyping();appendMsg('agent','❌ Erro '+r.status+': '+t.slice(0,300));setBusy(false);return;}
+      var d=await r.json();removeTyping();appendMsg('agent',d.answer,d.sources);}
+    catch(e){removeTyping();appendMsg('agent','❌ Erro de conexão/timeout ao organizar: '+e);}
     setBusy(false);
   }
   function reorgSim(){ _reorg(false); }
@@ -795,12 +797,17 @@ def api_maintenance():
 def api_reorg():
     """Organiza as pastas conforme 00-meta/config/instructions.md (Chroma roteia, LLM desempata).
     apply=false → simula; apply=true → move e reescreve os wiki links."""
-    import organizer
     data   = request.get_json(silent=True) or {}
     vault  = data.get("vault") or None
     apply_ = bool(data.get("apply"))
-    from agent import _vault as _resolve_vault
-    return jsonify(organizer.reorg(_resolve_vault(vault), apply=apply_))
+    try:
+        import organizer
+        from agent import _vault as _resolve_vault
+        return jsonify(organizer.reorg(_resolve_vault(vault), apply=apply_))
+    except Exception as e:
+        import traceback
+        log.error(f"/api/reorg erro: {e}\n{traceback.format_exc()}")
+        return jsonify({"answer": f"❌ Erro ao organizar: {e}", "moves": [], "sources": []})
 
 
 @app.route("/api/settings", methods=["GET", "POST"])
