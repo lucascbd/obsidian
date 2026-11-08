@@ -708,6 +708,20 @@ def ingest(raw_text: str, source_name: str, vault: Optional[str] = None, db: str
         content = data.get("content", raw_text[:4000])
         summary = data.get("summary", f"Nota criada a partir de {source_name}")
 
+        # Organizador: se houver instructions.md, o caminho é decidido pela taxonomia
+        # (ChromaDB roteia, LLM desempata) — ignora o path livre do LLM.
+        try:
+            import organizer
+            fm_data = _parse_frontmatter(content)
+            routed = organizer.classify_note(
+                db, content, title=fm_data.get("title") or summary[:60],
+                summary=summary, date=fm_data.get("date") or today,
+            )
+            if routed and routed.get("path"):
+                path = routed["path"]
+        except Exception as e:
+            log.warning(f"organizer (ingest): {e}")
+
         # Auto-link: busca notas relacionadas e adiciona seção antes de salvar
         related = _find_related_for_new_note(content, path, db=db)
         if related and "## Notas Relacionadas" not in content:

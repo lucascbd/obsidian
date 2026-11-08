@@ -230,6 +230,13 @@ HTML = """<!DOCTYPE html>
       <button class="btn-sub" onclick="reindexFull()">🔄 Reindexar ChromaDB (completo)</button>
     </div>
 
+    <div class="sec">
+      <div class="sec-title">Organização (00-meta/config/instructions.md)</div>
+      <div class="hint">Reorganiza as notas nas pastas conforme a taxonomia do seu instructions.md. O ChromaDB roteia pela categoria mais próxima e o LLM só desempata. <b>Simule primeiro</b> para revisar os movimentos antes de aplicar (aplicar move as notas e reescreve os wiki links).</div>
+      <button class="btn-sub" onclick="reorgSim()">🗂 Organizar vault — simular</button>
+      <button class="btn-sub" onclick="reorgApply()">✅ Organizar vault — aplicar</button>
+    </div>
+
     <div class="modal-btns">
       <button class="btn-cancel" onclick="closeSettings()">Cancelar</button>
       <button class="btn-ok" onclick="saveSettings()">Salvar</button>
@@ -343,6 +350,16 @@ HTML = """<!DOCTYPE html>
     catch(e){removeTyping();appendMsg('agent','❌ Erro na manutenção.');}setBusy(false);
   }
   async function reindexFull(){closeSettings();reindex();}
+  async function _reorg(apply){
+    closeSettings();
+    appendMsg('user', apply ? '✅ Organizar vault (aplicar)' : '🗂 Organizar vault (simular)');
+    appendTyping(); setBusy(true);
+    try{var r=await fetch('/api/reorg',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vault:getRoot(),apply:apply})});var d=await r.json();removeTyping();appendMsg('agent',d.answer,d.sources);}
+    catch(e){removeTyping();appendMsg('agent','❌ Erro ao organizar.');}
+    setBusy(false);
+  }
+  function reorgSim(){ _reorg(false); }
+  function reorgApply(){ if(confirm('Aplicar a organização? Isso move as notas e reescreve os wiki links. Recomendo simular antes.')) _reorg(true); }
 
   document.addEventListener('keydown',function(e){if(e.key==='Escape'){closeSettings();}});
   loadVault();
@@ -772,6 +789,18 @@ def api_maintenance():
     data  = request.get_json(silent=True) or {}
     vault = data.get("vault") or None
     return jsonify(obsidian_maintenance(vault=vault))
+
+
+@app.route("/api/reorg", methods=["POST"])
+def api_reorg():
+    """Organiza as pastas conforme 00-meta/config/instructions.md (Chroma roteia, LLM desempata).
+    apply=false → simula; apply=true → move e reescreve os wiki links."""
+    import organizer
+    data   = request.get_json(silent=True) or {}
+    vault  = data.get("vault") or None
+    apply_ = bool(data.get("apply"))
+    from agent import _vault as _resolve_vault
+    return jsonify(organizer.reorg(_resolve_vault(vault), apply=apply_))
 
 
 @app.route("/api/settings", methods=["GET", "POST"])
