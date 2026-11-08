@@ -194,10 +194,80 @@ def _apply_move(vault: str, src: str, dst: str) -> dict:
     return {"from": src, "to": new_id, "links_updated": links}
 
 
-def reorg(vault: str, apply: bool = False, limit: int = 100, scan_limit: int = 600) -> dict:
-    """Varre o vault e reorganiza as notas conforme instructions.md.
-    apply=False → simula (só Chroma, sem LLM; rápido). apply=True → desempata com
-    LLM, move e reescreve os wiki links. scan_limit bounda o tempo por chamada."""
+def _compute_moves(vault: str, cats: list, instr: str, use_llm: bool, limit: int) -> list:
+    """Calcula os movimentos REUSANDO os embeddings já no ChromaDB (sem reler/re-embed).
+    O LLM só é chamado (se use_llm) nos empates."""
+    import numpy as np
+    from core.indexer import get_collection
+    col = get_collection(vault)
+    data = col.get(include=["embeddings", "metadatas"])
+    names, mat = _vectors(cats)
+
+    note_vec, note_meta = {}, {}
+    for emb, meta in zip(data.get("embeddings") or [], data.get("metadatas") or []):
+        nid = meta.get("note_id", "")
+        if not nid or is_meta(nid) or nid in note_vec:
+            continue
+        note_vec[nid] = emb
+        note_meta[nid] = meta
+
+    moves = []
+    for nid, emb in note_vec.items():
+        q = np.array(list(emb), dtype=float)
+        q = q / (np.linalg.norm(q) + 1e-9)
+        sims = mat @ q
+        order = list(np.argsort(-sims)[:TOP_K])
+        sl = [(names[i], float(sims[i])) for i in order]
+        meta = note_meta[nid]
+        title = meta.get("title") or nid.split("/")[-1].replace(".md", "")
+        date = meta.get("date") or ""
+
+        if use_llm and len(sl) > 1 and (sl[0][1] - sl[1][1]) < MARGIN:
+            try:
+                content = vault_fs.read_note(vault, nid)
+            except Exception:
+                content = ""
+            cat = _llm_tiebreak(title, meta.get("source", ""), content,
+                                [c for c, _ in sl], instr) or sl[0][0]
+        else:
+            cat = sl[0][0]
+
+        target = build_path(cat, title, date)
+        if target.lower() != nid.lower():
+            moves.append({"from": nid, "to": target, "category": cat})
+            if len(moves) >= limit:
+                break
+    return moves
+
+
+_applying = {"running": False}
+
+
+def _apply_worker(vault: str):
+    _applying["running"] = True
+    try:
+        instr = load_instructions(vault)
+        cats = parse_taxonomy(instr) if instr else []
+        moves = _compute_moves(vault, cats, instr, use_llm=True, limit=100000)
+        log.info(f"[reorg] aplicando {len(moves)} move(s)…")
+        done = 0
+        for m in moves:
+            try:
+                _apply_move(vault, m["from"], m["to"])
+                done += 1
+            except Exception as e:
+                log.error(f"[reorg] erro em {m['from']}: {e}")
+        log.info(f"[reorg] concluído: {done}/{len(moves)} nota(s) reorganizada(s)")
+    except Exception as e:
+        log.error(f"[reorg] worker erro: {e}")
+    finally:
+        _applying["running"] = False
+
+
+def reorg(vault: str, apply: bool = False, limit: int = 300) -> dict:
+    """Reorganiza as notas conforme instructions.md, reusando os embeddings do Chroma.
+    apply=False → simula rápido (só Chroma). apply=True → roda em background (desempate
+    com LLM, move e reescreve os wiki links)."""
     instr = load_instructions(vault)
     cats = parse_taxonomy(instr) if instr else []
     if not cats:
@@ -205,38 +275,19 @@ def reorg(vault: str, apply: bool = False, limit: int = 100, scan_limit: int = 6
                           "Crie esse arquivo com a árvore de categorias sob `knowledge/`.",
                 "moves": [], "sources": []}
 
-    use_llm = apply   # simulação é só Chroma (grátis e rápida); aplicar desempata com LLM
-    moves, scanned = [], 0
-    for nid, path in vault_fs.iter_notes(vault):
-        scanned += 1
-        if scanned > scan_limit:
-            break
-        try:
-            content = vault_fs.read_path(path)
-        except Exception:
-            continue
-        fm = parse_frontmatter(content)
-        title = fm.get("title") or nid.split("/")[-1].replace(".md", "")
-        date = fm.get("date") or ""
-        cat = classify(content, title, fm.get("source", ""), instr, cats, use_llm=use_llm)
-        target = build_path(cat, title, date)
-        if target.lower() != nid.lower():
-            moves.append({"from": nid, "to": target, "category": cat})
-            if len(moves) >= limit:
-                break
-
     if not apply:
+        moves = _compute_moves(vault, cats, instr, use_llm=False, limit=limit)
         lines = [f"**{len(moves)} nota(s) a reorganizar** (simulação — nada foi movido):", ""]
-        lines += [f"- `{m['from']}` → `{m['to']}`" for m in moves[:50]]
-        if len(moves) > 50:
-            lines.append(f"- _(+{len(moves) - 50} …)_")
+        lines += [f"- `{m['from']}` → `{m['to']}`" for m in moves[:60]]
+        if len(moves) > 60:
+            lines.append(f"- _(+{len(moves) - 60} … rode o aplicar p/ o restante)_")
         return {"answer": "\n".join(lines), "moves": moves, "sources": []}
 
-    applied = []
-    for m in moves:
-        try:
-            applied.append(_apply_move(vault, m["from"], m["to"]))
-        except Exception as e:
-            log.error(f"[reorg] erro em {m['from']}: {e}")
-    return {"answer": f"✅ {len(applied)} nota(s) reorganizada(s) conforme instructions.md.",
-            "moves": applied, "sources": [a["to"] for a in applied]}
+    if _applying["running"]:
+        return {"answer": "⏳ Organização já está rodando em background.", "moves": [], "sources": []}
+    import threading
+    threading.Thread(target=_apply_worker, args=(vault,), daemon=True, name="reorg-apply").start()
+    return {"answer": "🗂 Organização iniciada em background. As notas vão sendo movidas e os "
+                      "wiki links reescritos — acompanhe no vault (e nos eventos `reorg`). "
+                      "O log do agente mostra `[reorg] concluído: N/M`.",
+            "moves": [], "sources": []}
