@@ -79,6 +79,19 @@ def init_db() -> None:
                 PRIMARY KEY (source, item_id)
             );
             CREATE INDEX IF NOT EXISTS idx_processed_date ON processed_items (source, item_date);
+            CREATE TABLE IF NOT EXISTS todos (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                vault      TEXT,
+                title      TEXT NOT NULL,
+                due        TEXT,            -- prazo (YYYY-MM-DD) ou vazio
+                status     TEXT DEFAULT 'open',   -- 'open' | 'done'
+                source     TEXT,            -- 'email' | 'teams' | 'manual' | ...
+                ref        TEXT,            -- msg_id / origem
+                note_path  TEXT,            -- nota relacionada no vault
+                created_at TEXT,
+                done_at    TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_todos_status ON todos (vault, status);
             CREATE TABLE IF NOT EXISTS ingest_queue (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 source     TEXT NOT NULL,
@@ -151,6 +164,56 @@ def queue_bump(qid: int) -> None:
 def queue_len() -> int:
     with _conn() as c:
         return c.execute("SELECT COUNT(*) AS n FROM ingest_queue").fetchone()["n"]
+
+
+# ── To-dos (extraídos de emails/reuniões + manuais) ─────────────────────────────
+
+def add_todo(vault: str, title: str, due: str = "", source: str = "", ref: str = "",
+             note_path: str = "") -> int:
+    import time
+    title = (title or "").strip()
+    if not title:
+        return 0
+    now_iso = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    with _lock, _conn() as c:
+        # evita duplicar o mesmo título vindo da mesma origem
+        if ref:
+            ex = c.execute("SELECT id FROM todos WHERE vault=? AND ref=? AND title=?",
+                           (vault, ref, title)).fetchone()
+            if ex:
+                return ex["id"]
+        cur = c.execute(
+            "INSERT INTO todos (vault, title, due, status, source, ref, note_path, created_at) "
+            "VALUES (?,?,?,'open',?,?,?,?)",
+            (vault, title[:300], (due or "")[:10], source, ref, note_path, now_iso),
+        )
+        return cur.lastrowid
+
+
+def list_todos(vault: str, status: str = None, limit: int = 200) -> list:
+    q = "SELECT id, title, due, status, source, ref, note_path, created_at, done_at FROM todos WHERE vault=?"
+    params = [vault]
+    if status:
+        q += " AND status=?"
+        params.append(status)
+    q += " ORDER BY (due='') ASC, due ASC, id DESC LIMIT ?"
+    params.append(limit)
+    with _conn() as c:
+        rows = c.execute(q, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def set_todo_status(todo_id: int, status: str) -> None:
+    import time
+    done_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()) if status == "done" else None
+    with _lock, _conn() as c:
+        c.execute("UPDATE todos SET status=?, done_at=? WHERE id=?", (status, done_at, todo_id))
+
+
+def count_todos(vault: str, status: str = "open") -> int:
+    with _conn() as c:
+        return c.execute("SELECT COUNT(*) AS n FROM todos WHERE vault=? AND status=?",
+                         (vault, status)).fetchone()["n"]
 
 
 def mark_processed(source: str, item_id: str, item_date: str = "",

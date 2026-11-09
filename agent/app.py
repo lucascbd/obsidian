@@ -363,8 +363,34 @@ HTML = """<!DOCTYPE html>
   function reorgSim(){ _reorg(false); }
   function reorgApply(){ if(confirm('Aplicar a organização? Isso move as notas e reescreve os wiki links. Recomendo simular antes.')) _reorg(true); }
 
+  // ── To-dos (tile) ──
+  async function loadTodos(){
+    try{
+      var r=await fetch('/api/todos?status=open&vault='+encodeURIComponent(getRoot()));var d=await r.json();
+      var body=document.getElementById('todo-body');var cnt=document.getElementById('todo-count');
+      var todos=d.todos||[];cnt.textContent=todos.length;
+      if(!todos.length){body.innerHTML='<div class="tile-empty"><div class="big">✅</div>Nenhuma tarefa aberta. Tarefas extraídas dos seus emails aparecem aqui.</div>';return;}
+      body.innerHTML='';
+      todos.forEach(function(t){
+        var div=document.createElement('div');div.className='todo-item';
+        var due=t.due?(' · <span style="color:var(--amber)">'+t.due+'</span>'):'';
+        div.innerHTML='<input type="checkbox" onchange="doneTodo('+t.id+',this)"><div><div>'+escapeHtml(t.title)+'</div><div style="font-size:11px;color:var(--muted)">'+(t.source||'')+due+'</div></div>';
+        body.appendChild(div);
+      });
+    }catch(e){}
+  }
+  function escapeHtml(s){var d=document.createElement('div');d.textContent=s||'';return d.innerHTML;}
+  async function doneTodo(id,el){
+    el.disabled=true;
+    try{await fetch('/api/todos/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:'done'})});
+      var item=el.closest('.todo-item');if(item){item.style.opacity='.4';setTimeout(function(){item.remove();var c=document.getElementById('todo-count');c.textContent=Math.max(0,(parseInt(c.textContent)||1)-1);},300);}
+    }catch(e){el.disabled=false;}
+  }
+
   document.addEventListener('keydown',function(e){if(e.key==='Escape'){closeSettings();}});
   loadVault();
+  loadTodos();
+  setInterval(loadTodos, 60000);  // atualiza a cada 1 min (novos emails viram to-dos)
 </script>
 </body>
 </html>
@@ -808,6 +834,28 @@ def api_reorg():
         import traceback
         log.error(f"/api/reorg erro: {e}\n{traceback.format_exc()}")
         return jsonify({"answer": f"❌ Erro ao organizar: {e}", "moves": [], "sources": []})
+
+
+@app.route("/api/todos", methods=["GET", "POST"])
+def api_todos():
+    from core import state
+    from agent import _vault as _resolve_vault
+    v = _resolve_vault(request.args.get("vault") or (request.get_json(silent=True) or {}).get("vault") or None)
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        tid = state.add_todo(v, data.get("title", ""), due=data.get("due", ""), source="manual")
+        return jsonify({"id": tid})
+    status = request.args.get("status")  # open|done|None(todos)
+    return jsonify({"todos": state.list_todos(v, status=status), "open": state.count_todos(v, "open")})
+
+
+@app.route("/api/todos/<int:todo_id>", methods=["POST"])
+def api_todo_update(todo_id):
+    from core import state
+    data = request.get_json(silent=True) or {}
+    status = data.get("status", "done")
+    state.set_todo_status(todo_id, "done" if status == "done" else "open")
+    return jsonify({"ok": True})
 
 
 @app.route("/api/settings", methods=["GET", "POST"])

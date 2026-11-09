@@ -613,8 +613,14 @@ REGRAS GERAIS (aplicar somente se não houver REGRAS DO VAULT acima):
 NOTAS EXISTENTES NO VAULT:
 {note_ids}
 
+AÇÕES / TO-DOS:
+- Extraia APENAS tarefas acionáveis para MIM (o leitor): algo que EU preciso fazer.
+- Ex.: "responder fulano até sexta", "fazer o treinamento obrigatório X", "revisar a base Y".
+- NÃO invente tarefas; se o conteúdo é só informativo (newsletter, confirmação), deixe a lista vazia.
+- Cada tarefa: objetiva, no infinitivo, com prazo se houver (YYYY-MM-DD).
+
 Responda APENAS com um JSON válido (sem texto antes ou depois):
-{{"path": "nivel1/nivel2/nivel3/nome.md", "content": "conteúdo completo da nota em markdown", "summary": "1-2 frases descrevendo o que foi criado"}}"""
+{{"path": "nivel1/nivel2/nivel3/nome.md", "content": "conteúdo completo da nota em markdown", "summary": "1-2 frases descrevendo o que foi criado", "todos": [{{"title": "ação objetiva", "due": "YYYY-MM-DD ou vazio"}}]}}"""
 
 
 def _find_related_for_new_note(content: str, exclude_path: str, db: str = None, threshold: float = 0.72) -> list:
@@ -735,6 +741,22 @@ def ingest(raw_text: str, source_name: str, vault: Optional[str] = None, db: str
         log.info(f"Ingest: {result}")
         state.record_event(_vault(db), actor="agent", kind="ingest",
                            summary=f"Importou '{source_name}' → {path}", source="ingest", ref=path)
+
+        # To-dos extraídos da destilação → tabela de to-dos (alimenta o tile)
+        try:
+            for td in (data.get("todos") or [])[:10]:
+                if isinstance(td, str):
+                    title, due = td, ""
+                else:
+                    title, due = td.get("title", ""), td.get("due", "")
+                if title and title.strip():
+                    tid = state.add_todo(_vault(db), title, due=due, source="email",
+                                         ref=path, note_path=path)
+                    if tid:
+                        state.record_event(_vault(db), actor="agent", kind="todo",
+                                           summary=f"To-do: {title}"[:200], source="email", ref=path)
+        except Exception as e:
+            log.warning(f"ingest todos: {e}")
 
         return {
             "answer":  f"{summary}\n\nNota criada: `{path}`\n\n{result}",
