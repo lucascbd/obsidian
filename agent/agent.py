@@ -308,8 +308,9 @@ def rebuild_indices(vault: Optional[str] = None) -> dict:
 
 
 def _build_vault_indices(vault: str, col) -> None:
-    """Gera notas de índice (MOC) em 00-meta/indices/ a partir dos metadados no ChromaDB.
-    Um índice por pasta raiz + mapa geral. Zero LLM."""
+    """Gera a hierarquia de índices (MOC) em 00-meta/indices/. Zero LLM.
+    Graph view: _mapa-geral → sub-temas (categorias) → notas.
+    (O antigo índice por pasta raiz foi removido por ser redundante.)"""
     import datetime
     today = datetime.date.today().isoformat()
 
@@ -323,62 +324,30 @@ def _build_vault_indices(vault: str, col) -> None:
         if nid not in seen_notes:
             seen_notes[nid] = {
                 "title": meta.get("title") or nid.split("/")[-1].replace(".md", "").replace("-", " ").title(),
-                "tags":  meta.get("tags", ""),
                 "date":  meta.get("date", ""),
             }
 
-    # Agrupa por pasta raiz → subpasta
+    # Agrupa por SUB-TEMA = pasta imediata da nota (ex.: knowledge/iqvia/x.md → iqvia)
     from collections import defaultdict
-    tree: dict[str, dict[str, list]] = defaultdict(lambda: defaultdict(list))
-    for nid, meta in sorted(seen_notes.items()):
+    by_sub: dict[str, list] = defaultdict(list)
+    roots = set()
+    for nid, meta in seen_notes.items():
         parts = nid.split("/")
-        root  = parts[0]
-        sub   = parts[1] if len(parts) > 2 else ""
-        tree[root][sub].append((nid, meta))
+        if len(parts) >= 2:
+            roots.add(parts[0])
+            sub = parts[-2]
+        else:
+            sub = "sem-categoria"
+        by_sub[sub].append((nid, meta))
 
-    # Gera um índice por pasta raiz
-    index_paths = []
-    for root, subs in sorted(tree.items()):
-        total = sum(len(notes) for notes in subs.values())
-        lines = [
-            f"---",
-            f"title: Índice — {root}",
-            f"date: {today}",
-            f"tags:",
-            f"  - indice",
-            f"  - auto-gerado",
-            f"---",
-            f"",
-            f"# Índice: {root}",
-            f"",
-            f"> {total} nota(s) · gerado automaticamente",
-            f"",
-        ]
-        for sub, notes in sorted(subs.items()):
-            if sub:
-                lines.append(f"## {sub}")
-                lines.append("")
-            for nid, meta in sorted(notes, key=lambda x: x[0]):
-                title = meta["title"]
-                lines.append(f"- [[{nid}|{title}]]")
-            lines.append("")
+    # Limpa os índices por pasta raiz antigos (agora redundantes)
+    for root in roots:
+        try:
+            vault_fs.delete_note(vault, f"00-meta/indices/{root}.md")
+        except Exception:
+            pass
 
-        content    = "\n".join(lines)
-        index_path = f"00-meta/indices/{root}.md"
-        tool_create_note(index_path, content, db=vault)
-        index_paths.append(index_path)
-        log.info(f"[indices] {index_path} — {total} notas")
-
-    # Índices por SUB-TEMA (categoria) em 00-meta/indices/sub-temas/
-    # Cada índice lista as notas da categoria → no graph view do Obsidian vira um
-    # hub por sub-tema, com as notas da categoria ligadas a ele.
-    from collections import defaultdict as _dd
-    by_sub = _dd(list)
-    for _root, _subs in tree.items():
-        for _sub, _notes in _subs.items():
-            if _sub:
-                by_sub[_sub].extend(_notes)
-
+    # Um índice por SUB-TEMA (categoria) → hub no graph view, ligado às suas notas
     for sub, notes in sorted(by_sub.items()):
         lines = [
             f"---",
@@ -401,7 +370,7 @@ def _build_vault_indices(vault: str, col) -> None:
         tool_create_note(f"00-meta/indices/sub-temas/{sub}.md", "\n".join(lines), db=vault)
     log.info(f"[indices] {len(by_sub)} índice(s) de sub-tema em 00-meta/indices/sub-temas/")
 
-    # Gera mapa geral
+    # Mapa geral → liga APENAS aos sub-temas (categorias). Hierarquia limpa no graph.
     map_lines = [
         f"---",
         f"title: Mapa Geral do Vault",
@@ -414,29 +383,15 @@ def _build_vault_indices(vault: str, col) -> None:
         f"",
         f"# Mapa Geral — {vault}",
         f"",
-        f"> {len(seen_notes)} nota(s) total · gerado automaticamente em {today}",
+        f"> {len(seen_notes)} nota(s) · {len(by_sub)} sub-tema(s) · gerado automaticamente em {today}",
         f"",
+        f"## Sub-temas",
     ]
-    for root, subs in sorted(tree.items()):
-        total = sum(len(n) for n in subs.values())
-        map_lines.append(f"## [[00-meta/indices/{root}.md|{root}]] ({total})")
-        for sub, notes in sorted(subs.items()):
-            if sub:
-                map_lines.append(f"### {sub} ({len(notes)})")
-            for nid, meta in sorted(notes, key=lambda x: x[0])[:5]:
-                map_lines.append(f"- [[{nid}|{meta['title']}]]")
-            if len(notes) > 5:
-                map_lines.append(f"- _(+{len(notes)-5} mais — ver [[00-meta/indices/{root}.md|índice completo]])_")
-        map_lines.append("")
-
-    if by_sub:
-        map_lines.append("## Sub-temas")
-        for sub in sorted(by_sub):
-            map_lines.append(f"- [[00-meta/indices/sub-temas/{sub}.md|{sub}]] ({len(by_sub[sub])})")
-        map_lines.append("")
+    for sub in sorted(by_sub):
+        map_lines.append(f"- [[00-meta/indices/sub-temas/{sub}|{sub}]] ({len(by_sub[sub])})")
 
     tool_create_note("00-meta/indices/_mapa-geral.md", "\n".join(map_lines), db=vault)
-    log.info(f"[indices] _mapa-geral.md gerado com {len(seen_notes)} notas e {len(index_paths)} índices")
+    log.info(f"[indices] _mapa-geral.md → {len(by_sub)} sub-temas, {len(seen_notes)} notas")
 
 
 def _is_settings_note(note_id: str) -> bool:
