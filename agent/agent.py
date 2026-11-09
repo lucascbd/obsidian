@@ -832,6 +832,51 @@ def process_email_payload(subject: str = "", sender: str = "", date: str = "", b
     return {"path": path, "answer": res.get("answer", ""), "sources": res.get("sources", [])}
 
 
+def enqueue_event(subject: str = "", start: str = "", end: str = "", organizer: str = "",
+                  location: str = "", attendees: str = "", body: str = "", event_id: str = "",
+                  web_link: str = "", vault: Optional[str] = None, db: str = None) -> dict:
+    """Enfileira uma reunião/compromisso do calendário para processamento assíncrono."""
+    if event_id and state.is_processed("calendar", event_id):
+        return {"queued": False, "skipped": True, "answer": "(reunião já processada)"}
+    payload = {"subject": subject, "start": start, "end": end, "organizer": organizer,
+               "location": location, "attendees": attendees, "body": body,
+               "event_id": event_id, "web_link": web_link, "vault": vault or db}
+    state.enqueue("calendar", event_id, payload)
+    if event_id:
+        state.mark_processed("calendar", event_id, item_date=(start or "")[:10], status="pending")
+    return {"queued": True, "answer": "enfileirado"}
+
+
+def process_event_payload(subject: str = "", start: str = "", end: str = "", organizer: str = "",
+                          location: str = "", attendees: str = "", body: str = "", event_id: str = "",
+                          web_link: str = "", vault: Optional[str] = None, db: str = None) -> dict:
+    """Destila uma reunião/compromisso (chamado pelo worker). Pode levantar LLMRateLimited."""
+    db = db or vault
+    raw = (
+        f"REUNIÃO: {subject}\n"
+        f"Quando: {start} — {end}\n"
+        f"Organizador: {organizer}\n"
+        f"Local: {location}\n"
+        f"Participantes: {attendees}\n\n"
+        f"{body}"
+    )
+    res = ingest(raw, source_name=f"reunião: {subject or '(sem título)'}", vault=vault, db=db)
+    path = res.get("path")
+    if path:
+        _inject_frontmatter_keys(_vault(db), path, {
+            "source":       "calendar",
+            "event_id":     event_id,
+            "start":        start,
+            "end":          end,
+            "organizer":    organizer,
+            "web_link":     web_link,
+        })
+        state.record_event(_vault(db), actor="agent", kind="meeting",
+                           summary=f"Reunião: {subject} ({start})"[:200],
+                           source="calendar", ref=event_id or path)
+    return {"path": path, "answer": res.get("answer", ""), "sources": res.get("sources", [])}
+
+
 def ingest_file(filename: str, content: bytes, vault: Optional[str] = None, db: str = None) -> dict:
     raw_text = _extract_text_from_file(filename, content)
     return ingest(raw_text, source_name=filename, vault=vault, db=db)

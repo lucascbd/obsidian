@@ -9,7 +9,7 @@ import logging
 import threading
 from flask import Flask, request, jsonify, render_template_string, Response, stream_with_context
 from flask_cors import CORS
-from agent import ask, weekly_summary, summarize_meeting, vault_review, normalize_tags, purge_vault, ingest_file, ingest_url, ingest_zip, get_vaults, stop_agent, reset_stop, tool_read_note, reindex_vault, rebuild_indices, obsidian_maintenance, generate_output, ingest_email, process_email_payload
+from agent import ask, weekly_summary, summarize_meeting, vault_review, normalize_tags, purge_vault, ingest_file, ingest_url, ingest_zip, get_vaults, stop_agent, reset_stop, tool_read_note, reindex_vault, rebuild_indices, obsidian_maintenance, generate_output, ingest_email, process_email_payload, enqueue_event, process_event_payload
 from core import vault_fs
 from core import settings as app_settings
 
@@ -794,6 +794,24 @@ def api_ingest_email():
     return jsonify(res), 202
 
 
+@app.route("/api/ingest-event", methods=["POST"])
+def api_ingest_event():
+    ok, err = _machine_auth()
+    if not ok:
+        return err
+    data = request.get_json(silent=True) or {}
+    if not data.get("subject"):
+        return jsonify({"error": "subject obrigatório"}), 400
+    res = enqueue_event(
+        subject=data.get("subject", ""), start=data.get("start", ""), end=data.get("end", ""),
+        organizer=data.get("organizer", ""), location=data.get("location", ""),
+        attendees=data.get("attendees", ""), body=data.get("body", ""),
+        event_id=data.get("event_id", ""), web_link=data.get("web_link", ""),
+        vault=data.get("vault") or None,
+    )
+    return jsonify(res), 202
+
+
 @app.route("/api/queue", methods=["GET"])
 def api_queue():
     ok, err = _machine_auth()
@@ -915,8 +933,10 @@ def _ingest_worker():
                 _t.sleep(3)
                 continue
             p = item["payload"]
+            src = item.get("source") or "outlook"
+            item_date = p.get("date") or p.get("start") or ""
             try:
-                r = process_email_payload(**p)
+                r = process_event_payload(**p) if src == "calendar" else process_email_payload(**p)
             except _agent_mod.sdk_llm.LLMRateLimited:
                 log.warning(f"[worker] limite de uso do LLM — pausando {WORKER_PAUSE // 60} min (item fica na fila)")
                 _t.sleep(WORKER_PAUSE)
@@ -924,8 +944,7 @@ def _ingest_worker():
             except Exception as e:
                 state.queue_bump(item["id"])
                 if item["attempts"] + 1 >= WORKER_MAX_ATTEMPTS:
-                    state.mark_processed("outlook", item["item_id"],
-                                         item_date=p.get("date", ""), status="skip")
+                    state.mark_processed(src, item["item_id"], item_date=item_date, status="skip")
                     state.queue_delete(item["id"])
                     log.error(f"[worker] desistindo de {item['item_id']} após {WORKER_MAX_ATTEMPTS} tentativas: {e}")
                 else:
@@ -933,7 +952,7 @@ def _ingest_worker():
                     _t.sleep(5)
                 continue
             path = r.get("path")
-            state.mark_processed("outlook", item["item_id"], item_date=p.get("date", ""),
+            state.mark_processed(src, item["item_id"], item_date=item_date,
                                  note_path=path or "", status="ok" if path else "skip")
             state.queue_delete(item["id"])
             log.info(f"[worker] processado {item['item_id']} — {path or '(sem nota)'}  | fila: {state.queue_len()}")

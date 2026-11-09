@@ -19,6 +19,8 @@ CONFIGURAÇÃO (variáveis de ambiente):
     RATELIMIT_PAUSE  pausa no limite do LLM, em seg. (padrão 1800)
     BACKFILL_DAYS    varredura inicial em dias; sobrepõe a config do agente se definido
     POLL_SECONDS     intervalo; sobrepõe a config do agente se definido
+    CAL_FUTURE_DAYS  janela do calendário à frente (padrão 30; 0 desliga reuniões)
+    CAL_PAST_DAYS    janela do calendário para trás (padrão 1)
 
 USO:
     pip install pywin32 requests truststore
@@ -54,16 +56,25 @@ RATELIMIT_PAUSE = int(os.environ.get("RATELIMIT_PAUSE", "1800"))
 _ENV_POLL       = os.environ.get("POLL_SECONDS")       # sobrepõe a config do agente
 _ENV_BACKFILL   = os.environ.get("BACKFILL_DAYS")      # sobrepõe a config do agente
 
-OL_INBOX = 6
-OL_MAIL  = 43
-BODY_MAX = 20000
-HEADERS  = {"X-Api-Key": AGENT_API_KEY, "Content-Type": "application/json"}
+OL_INBOX       = 6
+OL_CALENDAR    = 9
+OL_MAIL        = 43
+OL_APPOINTMENT = 26
+BODY_MAX       = 20000
+HEADERS        = {"X-Api-Key": AGENT_API_KEY, "Content-Type": "application/json"}
+
+# Janela do calendário (reuniões/calls). 0 em CAL_FUTURE_DAYS desliga o calendário.
+CAL_FUTURE_DAYS = int(os.environ.get("CAL_FUTURE_DAYS", "30"))
+CAL_PAST_DAYS   = int(os.environ.get("CAL_PAST_DAYS", "1"))
+
+
+def _folder(fid):
+    outlook = win32com.client.Dispatch("Outlook.Application")
+    return outlook.GetNamespace("MAPI").GetDefaultFolder(fid)
 
 
 def _inbox():
-    outlook = win32com.client.Dispatch("Outlook.Application")
-    ns = outlook.GetNamespace("MAPI")
-    return ns.GetDefaultFolder(OL_INBOX)
+    return _folder(OL_INBOX)
 
 
 def _config() -> dict:
@@ -81,7 +92,8 @@ def _config() -> dict:
         poll = int(_ENV_POLL)
     if _ENV_BACKFILL:
         backfill = int(_ENV_BACKFILL)
-    return {"poll": max(30, poll), "backfill": max(0, backfill), "skip": skip}
+    return {"poll": max(30, poll), "backfill": max(0, backfill), "skip": skip,
+            "cal_future": CAL_FUTURE_DAYS, "cal_past": CAL_PAST_DAYS}
 
 
 def _skip(sender: str, subject: str, patterns: list) -> bool:
@@ -91,16 +103,24 @@ def _skip(sender: str, subject: str, patterns: list) -> bool:
     return any(p in hay for p in patterns)
 
 
-def _processed_ids(since_date: str) -> set:
+def _processed_ids(since_date: str, source: str = "outlook") -> set:
     try:
         r = requests.get(f"{AGENT_URL}/api/processed",
-                         params={"source": "outlook", "since": since_date},
+                         params={"source": source, "since": since_date},
                          headers=HEADERS, timeout=60)
         if r.status_code == 200:
             return set(r.json().get("ids", []))
     except Exception as e:
         print("  ⚠ não consegui ler os processados do agente:", e)
     return set()
+
+
+def _post(endpoint: str, payload: dict) -> str:
+    r = requests.post(f"{AGENT_URL}{endpoint}", json=payload, headers=HEADERS, timeout=60)
+    if 200 <= r.status_code < 300:
+        return "ok"
+    print(f"  ❌ agente respondeu {r.status_code}: {r.text[:150]}")
+    return "error"
 
 
 def _send(payload: dict) -> str:
@@ -177,6 +197,76 @@ def _cycle(cfg: dict) -> str:
     return "ok"
 
 
+def _cycle_calendar(cfg: dict):
+    """Lê reuniões/compromissos do Calendário na janela [agora-past, agora+future]
+    e envia os novos ao agente (/api/ingest-event)."""
+    fut, past = cfg.get("cal_future", 0), cfg.get("cal_past", 1)
+    if fut <= 0:
+        return
+    now = datetime.datetime.now()
+    ws, we = now - datetime.timedelta(days=past), now + datetime.timedelta(days=fut)
+    done = _processed_ids(ws.strftime("%Y-%m-%d"), source="calendar")
+
+    try:
+        items = _folder(OL_CALENDAR).Items
+        items.IncludeRecurrences = True           # expande séries recorrentes
+        items.Sort("[Start]")
+        restrict = "[Start] >= '%s' AND [Start] <= '%s'" % (
+            ws.strftime("%m/%d/%Y %I:%M %p"), we.strftime("%m/%d/%Y %I:%M %p"))
+        seq = items.Restrict(restrict)
+    except Exception as e:
+        print("  ⚠ calendário indisponível:", e)
+        return
+
+    novos, count = [], 0
+    for appt in seq:
+        count += 1
+        if count > 2000:
+            break
+        if getattr(appt, "Class", None) != OL_APPOINTMENT:
+            continue
+        try:
+            st = appt.Start
+            start = datetime.datetime(st.year, st.month, st.day, st.hour, st.minute)
+        except Exception:
+            continue
+        if start < ws or start > we:
+            continue
+        gaid = getattr(appt, "GlobalAppointmentID", "") or getattr(appt, "EntryID", "")
+        eid = f"{gaid}|{start:%Y-%m-%d %H:%M}"
+        if not gaid or eid in done:
+            continue
+        novos.append((appt, eid, start))
+
+    if not novos:
+        print("  nenhuma reunião nova.")
+        return
+    print(f"  {len(novos)} reunião(ões) nova(s) (enviando até {MAX_PER_RUN}).")
+    for appt, eid, start in novos[:MAX_PER_RUN]:
+        try:
+            en = appt.End
+            end = datetime.datetime(en.year, en.month, en.day, en.hour, en.minute).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            end = ""
+        payload = {
+            "subject":   getattr(appt, "Subject", "") or "(sem título)",
+            "start":     start.strftime("%Y-%m-%d %H:%M"),
+            "end":       end,
+            "organizer": getattr(appt, "Organizer", "") or "",
+            "location":  getattr(appt, "Location", "") or "",
+            "attendees": (getattr(appt, "RequiredAttendees", "") or "")[:500],
+            "body":      (getattr(appt, "Body", "") or "")[:BODY_MAX],
+            "event_id":  eid,
+        }
+        print(f"  → {start:%Y-%m-%d %H:%M} {payload['subject'][:55]}")
+        try:
+            r = _post("/api/ingest-event", payload)
+        except Exception as e:
+            print("    ❌ falha de rede (retoma depois):", e)
+            continue
+        print("    ✅ enfileirado" if r == "ok" else "    ⚠ não enfileirado")
+
+
 def main():
     if not AGENT_URL or not AGENT_API_KEY:
         print("Configure AGENT_URL e AGENT_API_KEY. Ex.:")
@@ -194,6 +284,8 @@ def main():
     cfg = _config()
     if cfg["backfill"] > 0:
         print(f"Varredura inicial: últimos {cfg['backfill']} dias (resumível via banco do agente).")
+    if cfg["cal_future"] > 0:
+        print(f"Calendário: reuniões de {cfg['cal_past']} dia(s) atrás até {cfg['cal_future']} dias à frente.")
     print("Ctrl+C para parar — retoma no mesmo ponto (o banco do agente é a fonte da verdade).\n")
 
     while True:
@@ -202,6 +294,8 @@ def main():
             cfg = _config()   # relê o intervalo a cada ciclo (editável nas Settings)
             print(f"[{datetime.datetime.now():%H:%M:%S}] verificando emails… (intervalo {cfg['poll']}s)")
             result = _cycle(cfg)
+            print(f"[{datetime.datetime.now():%H:%M:%S}] verificando calendário…")
+            _cycle_calendar(cfg)
         except Exception as e:
             print("  ⚠ erro no ciclo:", e)
         time.sleep(RATELIMIT_PAUSE if result == "ratelimit" else cfg["poll"])
