@@ -369,6 +369,38 @@ def _build_vault_indices(vault: str, col) -> None:
         index_paths.append(index_path)
         log.info(f"[indices] {index_path} — {total} notas")
 
+    # Índices por SUB-TEMA (categoria) em 00-meta/indices/sub-temas/
+    # Cada índice lista as notas da categoria → no graph view do Obsidian vira um
+    # hub por sub-tema, com as notas da categoria ligadas a ele.
+    from collections import defaultdict as _dd
+    by_sub = _dd(list)
+    for _root, _subs in tree.items():
+        for _sub, _notes in _subs.items():
+            if _sub:
+                by_sub[_sub].extend(_notes)
+
+    for sub, notes in sorted(by_sub.items()):
+        lines = [
+            f"---",
+            f"title: Sub-tema — {sub}",
+            f"date: {today}",
+            f"tags:",
+            f"  - indice",
+            f"  - sub-tema",
+            f"  - auto-gerado",
+            f"---",
+            f"",
+            f"# Sub-tema: {sub}",
+            f"",
+            f"> {len(notes)} nota(s) · gerado automaticamente",
+            f"",
+        ]
+        for nid, meta in sorted(notes, key=lambda x: x[0]):
+            target = nid[:-3] if nid.endswith(".md") else nid
+            lines.append(f"- [[{target}|{meta['title']}]]")
+        tool_create_note(f"00-meta/indices/sub-temas/{sub}.md", "\n".join(lines), db=vault)
+    log.info(f"[indices] {len(by_sub)} índice(s) de sub-tema em 00-meta/indices/sub-temas/")
+
     # Gera mapa geral
     map_lines = [
         f"---",
@@ -395,6 +427,12 @@ def _build_vault_indices(vault: str, col) -> None:
                 map_lines.append(f"- [[{nid}|{meta['title']}]]")
             if len(notes) > 5:
                 map_lines.append(f"- _(+{len(notes)-5} mais — ver [[00-meta/indices/{root}.md|índice completo]])_")
+        map_lines.append("")
+
+    if by_sub:
+        map_lines.append("## Sub-temas")
+        for sub in sorted(by_sub):
+            map_lines.append(f"- [[00-meta/indices/sub-temas/{sub}.md|{sub}]] ({len(by_sub[sub])})")
         map_lines.append("")
 
     tool_create_note("00-meta/indices/_mapa-geral.md", "\n".join(map_lines), db=vault)
