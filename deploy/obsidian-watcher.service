@@ -1,0 +1,21 @@
+[Unit]
+Description=Mordomo do Conhecimento — watcher (indexa o vault no ChromaDB)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__RUN_USER__
+WorkingDirectory=__AGENT_HOME__/watcher
+EnvironmentFile=/etc/obsidian-agent.env
+Environment=PYTHONPATH=__AGENT_HOME__
+Environment=AGENT_HOME=__AGENT_HOME__
+Environment=HOME=__AGENT_HOME__
+Environment=PYTHONUNBUFFERED=1
+UMask=0002
+ExecStart=__AGENT_HOME__/.venv/bin/python watcher.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

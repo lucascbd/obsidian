@@ -5,13 +5,15 @@ primeiro componente do caminho relativo a VAULT_ROOT. Debounce por arquivo
 (editores/ignis emitem vários eventos por save). Estado em SQLite.
 """
 
+import os
 import sys
 import time
 import logging
 import threading
 from pathlib import Path
 
-sys.path.insert(0, "/app")  # core/ montado em /app/core
+# core/ fica na raiz do repo: /app no container; $AGENT_HOME quando rodando bare.
+sys.path.insert(0, os.environ.get("AGENT_HOME", "/app"))
 
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
