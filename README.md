@@ -2,66 +2,55 @@
 
 Assistente pessoal sobre um vault Obsidian em disco, com busca semântica local.
 
-**Arquitetura (em disco):**
-- **Obsidian (ignis)** — vault Markdown em `./vaults`, servido via web (`:8080`).
-- **Python (agente Flask)** — raciocínio, ingestão e redação (`:8090`).
-- **ChromaDB** — índice semântico persistente (`:8000`).
-- **SQLite** (`./data/state.db`) — estado de sincronização, IDs processados e grafo de links.
-- **watcher** — observa o vault via inotify (watchdog) e mantém o ChromaDB sincronizado.
+**Arquitetura (em disco, LXC dedicado):**
+- **Obsidian (ignis)** — container; vault Markdown em `VAULT_ROOT`, servido via web.
+- **ChromaDB** — container; índice semântico persistente, publicado só em `127.0.0.1:8001`.
+- **Python (agente Flask)** — bare (systemd `obsidian-agent`): raciocínio, ingestão e redação (`:8090`).
+- **watcher** — bare (systemd `obsidian-watcher`): observa o vault via inotify e mantém o ChromaDB sincronizado.
+- **SQLite** (`DATA_DIR/state.db`) — estado de sincronização, IDs processados e grafo de links.
 
-> **Python (agente)** raciocina via **Claude Agent SDK** autenticado pela assinatura
-> **Claude Pro** (`CLAUDE_CODE_OAUTH_TOKEN`). Fase 3: ingestão de e-mail/Teams via Microsoft Graph.
+> O agente raciocina via **Claude Agent SDK** autenticado pela assinatura **Claude Pro**
+> (`CLAUDE_CODE_OAUTH_TOKEN`). Ingestão de e-mail/Teams via `scripts/outlook_collector.py` (roda no PC).
 
 ## Token da assinatura Pro (uma vez)
 
-O agente usa sua assinatura Claude Pro via Claude Agent SDK. Gere o token numa máquina
-com navegador e o Claude Code instalado:
+Gere o token numa máquina com navegador e o Claude Code instalado:
 
 ```bash
 claude setup-token   # faz login na conta Pro e imprime o token (validade ~1 ano)
 ```
 
-Cole o valor em `CLAUDE_CODE_OAUTH_TOKEN` nas variáveis da stack. **Não** defina
-`ANTHROPIC_API_KEY` — ela tem precedência e ignoraria o token do Pro. O uso conta
-contra os limites da assinatura.
+Cole em `CLAUDE_CODE_OAUTH_TOKEN` no `/etc/obsidian-agent.env`. **Não** defina
+`ANTHROPIC_API_KEY` — ela tem precedência e ignoraria o token do Pro.
 
-## Deploy via Portainer (Git)
+## Instalação / deploy
 
-### 1. Stacks → Add stack → Repository
+```bash
+# 1. agent + watcher (Python 3.11 via uv, usuário obsidian uid 1000, unidades systemd)
+sudo bash deploy/install.sh
 
-| Campo | Valor |
-|-------|-------|
-| Repository URL | `https://github.com/lucascbd/obsidian` |
-| Branch | `main` |
-| Compose path | `docker-compose.yml` |
+# 2. infra em container (ignis + chroma). Porta do ignis: IGNIS_HOST_PORT em deploy/.env
+docker compose -p obsidian-infra -f deploy/docker-compose.infra.yml up -d
 
-### 2. Variáveis de ambiente
+# 3. preencha /etc/obsidian-agent.env (token, AGENT_API_KEY) e
+systemctl restart obsidian-agent obsidian-watcher
+```
 
-| Variável | Valor |
-|----------|-------|
-| `OBSIDIAN_VERSION` | `1.12.7` |
-| `PUID` / `PGID` | `1000` / `1000` |
-| `DEFAULT_VAULT` | nome do subdiretório em `./vaults` (vazio = primeiro encontrado) |
-| `CLAUDE_CODE_OAUTH_TOKEN` | token da assinatura Pro (`claude setup-token`) |
-| `ANTHROPIC_MODEL` | `sonnet` (ou `opus`/`haiku`) |
-| `IGNIS_HOST_PORT` / `AGENT_HOST_PORT` | portas no host (padrão 8080 / 8090) |
-| `FLASK_SECRET_KEY` | string aleatória |
+Caminhos padrão: vault `/data/compose/113/vaults`, estado `/data/compose/113/data`,
+índice `/data/compose/113/chroma`, código `/opt/obsidian`.
 
-### 3. Deploy the stack
+> Python 3.11 é obrigatório: `chromadb==0.5.20` depende do `chroma-hnswlib`, que não
+> compila no Python 3.13 do Debian trixie. O `install.sh` cuida disso via `uv`.
 
-**Deploy the stack** — o Portainer builda e sobe tudo. Os volumes `./vaults` e `./data`
-persistem no host.
+**Atualizar:** `sudo bash /opt/obsidian/deploy/install.sh && systemctl restart obsidian-agent obsidian-watcher`
+(faz `git checkout -f` da branch — alterações locais não commitadas são descartadas).
 
----
+**Logs:** `journalctl -u obsidian-agent -f` · `journalctl -u obsidian-watcher -f`
 
 ## Uso
 
-- **Obsidian (ignis):** `http://<IP>:8080` — edite notas; o watcher indexa em segundos.
+- **Obsidian (ignis):** `http://<IP>:8081` — edite notas; o watcher indexa em segundos.
 - **Agente:** `http://<IP>:8090` — perguntas, ingestão de arquivos/URLs, geração de conteúdo.
 
-Cada subdiretório de `./vaults` é um vault. Notas em `00-meta/` (índices e config do
+Cada subdiretório de `VAULT_ROOT` é um vault. Notas em `00-meta/` (índices e config do
 agente) não entram na busca.
-
-## Atualizar após mudanças no código
-
-Portainer → Stacks → **Pull and redeploy**.
