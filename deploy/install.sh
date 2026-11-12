@@ -28,14 +28,14 @@ if ! command -v node >/dev/null 2>&1; then
 fi
 npm install -g @anthropic-ai/claude-code
 
-# 2. Código: clona ou atualiza
-if [ -d "$AGENT_HOME/.git" ]; then
-  git -C "$AGENT_HOME" fetch origin "$BRANCH"
-  git -C "$AGENT_HOME" checkout "$BRANCH"
-  git -C "$AGENT_HOME" reset --hard "origin/$BRANCH"
-else
-  git clone --branch "$BRANCH" "$REPO" "$AGENT_HOME"
+# 2. Código: clona, ou inicializa git no diretório existente (mesmo não-vazio), ou atualiza
+mkdir -p "$AGENT_HOME"
+if [ ! -d "$AGENT_HOME/.git" ]; then
+  git -C "$AGENT_HOME" init -q
+  git -C "$AGENT_HOME" remote add origin "$REPO" 2>/dev/null || git -C "$AGENT_HOME" remote set-url origin "$REPO"
 fi
+git -C "$AGENT_HOME" fetch --depth 1 origin "$BRANCH"
+git -C "$AGENT_HOME" checkout -f -B "$BRANCH" "origin/$BRANCH"
 
 # 3. venv + dependências Python (agent + watcher num só venv)
 python3 -m venv "$AGENT_HOME/.venv"
