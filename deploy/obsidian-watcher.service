@@ -10,7 +10,7 @@ WorkingDirectory=__AGENT_HOME__/watcher
 EnvironmentFile=/etc/obsidian-agent.env
 Environment=PYTHONPATH=__AGENT_HOME__
 Environment=AGENT_HOME=__AGENT_HOME__
-Environment=HOME=__AGENT_HOME__
+Environment=HOME=__RUN_HOME__
 Environment=PYTHONUNBUFFERED=1
 UMask=0002
 ExecStart=__AGENT_HOME__/.venv/bin/python watcher.py

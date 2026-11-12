@@ -1,6 +1,6 @@
 # Infra que continua em container no LXC dedicado: ignis (Obsidian web) + ChromaDB.
 # O agent e o watcher rodam BARE (systemd) — ver deploy/install.sh.
-# Suba com:  docker compose -f deploy/docker-compose.infra.yml up -d
+# Suba com:  docker compose -p obsidian-infra -f deploy/docker-compose.infra.yml up -d
 services:
 
   ignis:
@@ -21,9 +21,9 @@ services:
     image: chromadb/chroma:0.5.20
     container_name: obsidian-chromadb
     restart: unless-stopped
-    # Publica SÓ no localhost do host — o agent/watcher bare acessam 127.0.0.1:8000.
+    # Publica SÓ no localhost do host — o agent/watcher bare acessam 127.0.0.1:8001 (8000 = Portainer).
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:${CHROMA_HOST_PORT:-8001}:8000"
     environment:
       IS_PERSISTENT: "TRUE"
       ANONYMIZED_TELEMETRY: "FALSE"
