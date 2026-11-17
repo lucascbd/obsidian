@@ -282,7 +282,7 @@ HTML = """<!DOCTYPE html>
     return s;
   }
   function renderMarkdown(text){
-    var lines=(text||'').split('\n'), html=[], buf=[], listType=null, para=[];
+    var lines=(text||'').split('\\n'), html=[], buf=[], listType=null, para=[];
     function flushList(){ if(listType){html.push('<'+listType+'>'+buf.join('')+'</'+listType+'>');buf=[];listType=null;} }
     function flushPara(){ if(para.length){html.push('<p>'+para.join('<br>')+'</p>');para=[];} }
     for(var i=0;i<lines.length;i++){
