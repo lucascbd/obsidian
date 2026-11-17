@@ -59,6 +59,16 @@ HTML = """<!DOCTYPE html>
   .bubble{padding:9px 12px;border-radius:11px;font-size:13px;line-height:1.55;white-space:pre-wrap;word-break:break-word}
   .msg.user .bubble{background:var(--accent);color:#fff;border-bottom-right-radius:3px}
   .msg.agent .bubble{background:var(--surface);border:1px solid var(--border);border-bottom-left-radius:3px}
+  .bubble.md{white-space:normal}
+  .bubble.md h3,.bubble.md h4,.bubble.md h5,.bubble.md h6{font-size:14px;font-weight:600;margin:10px 0 4px;color:var(--text)}
+  .bubble.md p{margin:6px 0}
+  .bubble.md ul,.bubble.md ol{margin:6px 0;padding-left:20px}
+  .bubble.md li{margin:3px 0}
+  .bubble.md strong{font-weight:600;color:var(--text)}
+  .bubble.md code{background:var(--surface2);padding:1px 5px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:12px}
+  .bubble.md a{color:var(--accent)}
+  .bubble.md>*:first-child{margin-top:0}
+  .bubble.md>*:last-child{margin-bottom:0}
   .sources{display:flex;gap:4px;flex-wrap:wrap}
   .src-tag{font-size:9px;padding:1px 6px;border-radius:4px;background:var(--surface2);border:1px solid var(--border);color:var(--muted);font-family:'JetBrains Mono',monospace}
   .prog-list{padding:7px 11px;background:var(--surface);border:1px solid var(--border);border-radius:11px;display:flex;flex-direction:column;gap:3px}
@@ -262,10 +272,38 @@ HTML = """<!DOCTYPE html>
   }
 
   // ── Chat ──
+  // Markdown → HTML seguro (escapa HTML antes; sem dependência externa).
+  function escHtml(s){return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+  function inlineMd(s){
+    s=escHtml(s);
+    s=s.replace(/`([^`]+)`/g,'<code>$1</code>');
+    s=s.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
+    s=s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
+    return s;
+  }
+  function renderMarkdown(text){
+    var lines=(text||'').split('\n'), html=[], buf=[], listType=null, para=[];
+    function flushList(){ if(listType){html.push('<'+listType+'>'+buf.join('')+'</'+listType+'>');buf=[];listType=null;} }
+    function flushPara(){ if(para.length){html.push('<p>'+para.join('<br>')+'</p>');para=[];} }
+    for(var i=0;i<lines.length;i++){
+      var line=lines[i];
+      var h=line.match(/^(#{1,6})\s+(.*)$/), ul=line.match(/^\s*[-*]\s+(.*)$/), ol=line.match(/^\s*\d+\.\s+(.*)$/);
+      if(h){ flushList();flushPara(); var lvl=Math.min(h[1].length+2,6); html.push('<h'+lvl+'>'+inlineMd(h[2])+'</h'+lvl+'>'); }
+      else if(ul){ flushPara(); if(listType&&listType!=='ul')flushList(); listType='ul'; buf.push('<li>'+inlineMd(ul[1])+'</li>'); }
+      else if(ol){ flushPara(); if(listType&&listType!=='ol')flushList(); listType='ol'; buf.push('<li>'+inlineMd(ol[1])+'</li>'); }
+      else if(line.trim()===''){ flushList();flushPara(); }
+      else { flushList(); para.push(inlineMd(line)); }
+    }
+    flushList();flushPara();
+    return html.join('');
+  }
   function appendMsg(role,content,sources){
     var chat=document.getElementById('chat');var emp=document.getElementById('chat-empty');if(emp)emp.remove();
     var div=document.createElement('div');div.className='msg '+role;
-    var b=document.createElement('div');b.className='bubble';b.textContent=content;div.appendChild(b);
+    var b=document.createElement('div');b.className='bubble';
+    if(role==='agent'){ b.classList.add('md'); b.innerHTML=renderMarkdown(content); }
+    else { b.textContent=content; }
+    div.appendChild(b);
     if(sources&&sources.length){var s=document.createElement('div');s.className='sources';sources.forEach(function(x){var t=document.createElement('span');t.className='src-tag';t.textContent=x.split('/').pop();t.title=x;s.appendChild(t);});div.appendChild(s);}
     chat.appendChild(div);chat.scrollTop=chat.scrollHeight;return div;
   }
