@@ -21,6 +21,8 @@ CONFIGURAÇÃO (variáveis de ambiente):
     POLL_SECONDS     intervalo; sobrepõe a config do agente se definido
     CAL_FUTURE_DAYS  janela do calendário à frente (padrão 30; 0 desliga reuniões)
     CAL_PAST_DAYS    janela do calendário para trás (padrão 1)
+    CF_ACCESS_CLIENT_ID / CF_ACCESS_CLIENT_SECRET
+                     Service Token do Cloudflare Access (se o agente estiver atrás do Access)
 
 USO:
     pip install pywin32 requests truststore
@@ -63,6 +65,14 @@ OL_APPOINTMENT = 26
 BODY_MAX       = 20000
 HEADERS        = {"X-Api-Key": AGENT_API_KEY, "Content-Type": "application/json"}
 
+# Cloudflare Access (Zero Trust): se o agente estiver atrás do Access, crie um
+# Service Token e defina estas duas variáveis — o Access deixa o coletor passar.
+_CF_ID     = os.environ.get("CF_ACCESS_CLIENT_ID", "")
+_CF_SECRET = os.environ.get("CF_ACCESS_CLIENT_SECRET", "")
+if _CF_ID and _CF_SECRET:
+    HEADERS["CF-Access-Client-Id"] = _CF_ID
+    HEADERS["CF-Access-Client-Secret"] = _CF_SECRET
+
 # Janela do calendário (reuniões/calls). 0 em CAL_FUTURE_DAYS desliga o calendário.
 CAL_FUTURE_DAYS = int(os.environ.get("CAL_FUTURE_DAYS", "30"))
 CAL_PAST_DAYS   = int(os.environ.get("CAL_PAST_DAYS", "1"))
@@ -81,7 +91,7 @@ def _config() -> dict:
     """Lê intervalo/backfill/filtro do agente; env tem prioridade quando definido."""
     poll, backfill, skip = 300, 0, []
     try:
-        r = requests.get(f"{AGENT_URL}/api/collector-config", headers=HEADERS, timeout=30)
+        r = requests.get(f"{AGENT_URL}/api/collector-config", headers=HEADERS, timeout=30, allow_redirects=False)
         if r.status_code == 200:
             d = r.json()
             poll, backfill = int(d.get("poll_seconds", 300)), int(d.get("backfill_days", 0))
@@ -109,7 +119,7 @@ def _processed_ids(since_date: str, source: str = "outlook"):
     try:
         r = requests.get(f"{AGENT_URL}/api/processed",
                          params={"source": source, "since": since_date},
-                         headers=HEADERS, timeout=60)
+                         headers=HEADERS, timeout=60, allow_redirects=False)
         if r.status_code == 200:
             return set(r.json().get("ids", [])), True
         print(f"  ⚠ /api/processed respondeu {r.status_code}: {r.text[:150]}")
@@ -120,7 +130,7 @@ def _processed_ids(since_date: str, source: str = "outlook"):
 
 
 def _post(endpoint: str, payload: dict) -> str:
-    r = requests.post(f"{AGENT_URL}{endpoint}", json=payload, headers=HEADERS, timeout=60)
+    r = requests.post(f"{AGENT_URL}{endpoint}", json=payload, headers=HEADERS, timeout=60, allow_redirects=False)
     if 200 <= r.status_code < 300:
         return "ok"
     print(f"  ❌ agente respondeu {r.status_code}: {r.text[:150]}")
@@ -129,7 +139,7 @@ def _post(endpoint: str, payload: dict) -> str:
 
 def _send(payload: dict) -> str:
     """'ok' | 'error'. O agente só ENFILEIRA (202) — a destilação é assíncrona no servidor."""
-    r = requests.post(f"{AGENT_URL}/api/ingest-email", json=payload, headers=HEADERS, timeout=60)
+    r = requests.post(f"{AGENT_URL}/api/ingest-email", json=payload, headers=HEADERS, timeout=60, allow_redirects=False)
     if 200 <= r.status_code < 300:
         return "ok"
     print(f"  ❌ agente respondeu {r.status_code}: {r.text[:150]}")
@@ -288,7 +298,7 @@ def main():
 
     print(f"Coletor de email iniciado. Agente: {AGENT_URL}")
     try:
-        h = requests.get(f"{AGENT_URL}/health", timeout=15)
+        h = requests.get(f"{AGENT_URL}/health", timeout=15, allow_redirects=False)
         print(f"Conexão com o agente: {'OK' if h.status_code == 200 else 'resposta ' + str(h.status_code)}")
     except Exception as e:
         print(f"⚠ Não consegui falar com o agente ({AGENT_URL}): {e}")
