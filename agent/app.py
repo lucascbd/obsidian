@@ -114,6 +114,19 @@ HTML = """<!DOCTYPE html>
   .c-btn:hover{filter:brightness(1.1)}
   .todo-item{display:flex;align-items:flex-start;gap:8px;font-size:13px;color:var(--text)}
   .todo-item input{margin-top:3px}
+  .todo-item.done .todo-title{text-decoration:line-through;color:var(--muted)}
+  .todo-main{flex:1;min-width:0}
+  .todo-title{line-height:1.35;word-break:break-word}
+  .todo-meta{font-size:11px;color:var(--muted);margin-top:1px}
+  .todo-link{color:var(--green);text-decoration:none;font-weight:600;margin-left:4px}
+  .todo-link:hover{text-decoration:underline}
+  .todo-check{flex-shrink:0;width:20px;height:20px;line-height:18px;text-align:center;border-radius:6px;border:1.5px solid var(--border);background:var(--surface);color:var(--muted);cursor:pointer;font-size:12px;padding:0;margin-top:1px}
+  .todo-check:hover{border-color:var(--green);color:var(--green);background:rgba(16,185,129,.08)}
+  .todo-restore{flex-shrink:0;border:1px solid var(--border);background:var(--surface);color:var(--label);border-radius:6px;cursor:pointer;font-size:13px;padding:2px 8px}
+  .todo-restore:hover{filter:brightness(1.15)}
+  .hist-btn{border:1px solid var(--border);background:var(--surface2);color:var(--muted);border-radius:8px;cursor:pointer;font-size:13px;padding:3px 8px;line-height:1}
+  .hist-btn:hover,.hist-btn.on{border-color:var(--accent);color:var(--text)}
+  .hist-bar{font-size:11px;color:var(--muted);padding:2px 2px 8px;border-bottom:1px solid var(--border);margin-bottom:8px}
   .prio-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;margin-top:5px}
   .c-draft{width:100%;box-sizing:border-box;resize:vertical;font-family:inherit;font-size:12px;line-height:1.5;color:var(--text);background:var(--surface);border:1px solid var(--border);border-radius:7px;padding:7px 8px}
 
@@ -186,7 +199,7 @@ HTML = """<!DOCTYPE html>
     </section>
 
     <section class="tile">
-      <div class="tile-head"><div class="tile-ico todo">✅</div><h2>To-dos</h2><span class="tile-count" id="todo-count">0</span></div>
+      <div class="tile-head"><div class="tile-ico todo">✅</div><h2>To-dos</h2><span class="tile-count" id="todo-count">0</span><button class="hist-btn" id="todo-hist-btn" onclick="toggleTodoHistory()" title="Histórico de concluídas">🕑</button></div>
       <div class="tile-body" id="todo-body">
         <div class="tile-empty"><div class="big">✅</div>Tarefas que o agente extrair dos seus emails e conversas aparecem aqui como uma lista de afazeres.<br><span class="soon">Microsoft Graph — em breve</span></div>
       </div>
@@ -404,30 +417,69 @@ HTML = """<!DOCTYPE html>
   function reorgApply(){ if(confirm('Aplicar a organização? Isso move as notas e reescreve os wiki links. Recomendo simular antes.')) _reorg(true); }
 
   // ── To-dos (tile) ──
+  var todoHistory=false;
+  var PC={alta:'var(--red)',media:'var(--amber)',baixa:'var(--muted)'};
+  function escapeHtml(s){var d=document.createElement('div');d.textContent=s||'';return d.innerHTML;}
+  function toggleTodoHistory(){
+    todoHistory=!todoHistory;
+    var b=document.getElementById('todo-hist-btn');if(b)b.classList.toggle('on',todoHistory);
+    loadTodos();
+  }
   async function loadTodos(){
+    if(todoHistory){return loadTodoHistory();}
     try{
       var r=await fetch('/api/todos?status=open&vault='+encodeURIComponent(getRoot()));var d=await r.json();
       var body=document.getElementById('todo-body');var cnt=document.getElementById('todo-count');
       var todos=d.todos||[];cnt.textContent=todos.length;
       if(!todos.length){body.innerHTML='<div class="tile-empty"><div class="big">✅</div>Nenhuma tarefa aberta. Tarefas extraídas dos seus emails aparecem aqui.</div>';return;}
       body.innerHTML='';
-      var pc={alta:'var(--red)',media:'var(--amber)',baixa:'var(--muted)'};
       todos.forEach(function(t){
-        var div=document.createElement('div');div.className='todo-item';
+        var div=document.createElement('div');div.className='todo-item';div.id='todo'+t.id;
         var due=t.due?(' · <span style="color:var(--amber)">'+t.due+'</span>'):'';
         var prio=t.priority||'media';
-        var dot='<span class="prio-dot" title="'+prio+'" style="background:'+(pc[prio]||pc.media)+'"></span>';
-        div.innerHTML='<input type="checkbox" onchange="doneTodo('+t.id+',this)">'+dot+'<div><div>'+escapeHtml(t.title)+'</div><div style="font-size:11px;color:var(--muted)">'+prio+' · '+(t.source||'')+due+'</div></div>';
+        var dot='<span class="prio-dot" title="'+prio+'" style="background:'+(PC[prio]||PC.media)+'"></span>';
+        var link=t.link?('<a class="todo-link" href="'+escapeHtml(t.link)+'" target="_blank" rel="noopener" title="Abrir no Outlook">📧 abrir</a>'):'';
+        div.innerHTML=
+          '<button class="todo-check" onclick="doneTodo('+t.id+',this)" title="Concluir">✓</button>'+
+          dot+
+          '<div class="todo-main"><div class="todo-title">'+escapeHtml(t.title)+'</div>'+
+          '<div class="todo-meta">'+prio+' · '+(t.source||'')+due+' '+link+'</div></div>';
         body.appendChild(div);
       });
     }catch(e){}
   }
-  function escapeHtml(s){var d=document.createElement('div');d.textContent=s||'';return d.innerHTML;}
+  async function loadTodoHistory(){
+    try{
+      var r=await fetch('/api/todos?status=done&vault='+encodeURIComponent(getRoot()));var d=await r.json();
+      var body=document.getElementById('todo-body');var cnt=document.getElementById('todo-count');
+      var todos=d.todos||[];cnt.textContent=d.open||0;
+      body.innerHTML='<div class="hist-bar">🕑 Concluídas ('+todos.length+') — toque no relógio para voltar</div>';
+      if(!todos.length){body.innerHTML+='<div class="tile-empty"><div class="big">🕑</div>Nenhuma tarefa concluída ainda.</div>';return;}
+      todos.forEach(function(t){
+        var div=document.createElement('div');div.className='todo-item done';div.id='todo'+t.id;
+        var prio=t.priority||'media';
+        var dot='<span class="prio-dot" title="'+prio+'" style="background:'+(PC[prio]||PC.media)+'"></span>';
+        var when=t.done_at?(' · '+t.done_at.slice(0,10)):'';
+        div.innerHTML=
+          dot+
+          '<div class="todo-main"><div class="todo-title">'+escapeHtml(t.title)+'</div>'+
+          '<div class="todo-meta">concluída'+when+'</div></div>'+
+          '<button class="todo-restore" onclick="restoreTodo('+t.id+')" title="Restaurar">↩︎</button>';
+        body.appendChild(div);
+      });
+    }catch(e){}
+  }
   async function doneTodo(id,el){
     el.disabled=true;
     try{await fetch('/api/todos/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:'done'})});
-      var item=el.closest('.todo-item');if(item){item.style.opacity='.4';setTimeout(function(){item.remove();var c=document.getElementById('todo-count');c.textContent=Math.max(0,(parseInt(c.textContent)||1)-1);},300);}
+      var item=document.getElementById('todo'+id);if(item){item.style.opacity='.4';setTimeout(function(){item.remove();var c=document.getElementById('todo-count');c.textContent=Math.max(0,(parseInt(c.textContent)||1)-1);},300);}
     }catch(e){el.disabled=false;}
+  }
+  async function restoreTodo(id){
+    try{await fetch('/api/todos/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:'open'})});
+      var item=document.getElementById('todo'+id);if(item){item.style.opacity='.4';setTimeout(function(){item.remove();},300);}
+      var c=document.getElementById('todo-count');c.textContent=(parseInt(c.textContent)||0)+1;
+    }catch(e){}
   }
 
   // ── Email (tile de rascunhos de resposta) ──

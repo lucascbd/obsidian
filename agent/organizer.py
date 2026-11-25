@@ -148,6 +148,36 @@ def build_path(category: str, title: str, date: str) -> str:
     return f"{KNOWLEDGE}/{slugify(category)}/{d}-{slugify(title)}.md"
 
 
+def enforce_structure(vault: str, path: str) -> str:
+    """Guarda final: garante knowledge/{categoria}/{arquivo}.md (profundidade 2).
+    Colapsa qualquer subpasta extra que o LLM tenha inventado. 00-meta fica intocado.
+    Se houver taxonomia e um dos segmentos for categoria válida, usa-a como categoria."""
+    parts = [p for p in (path or "").strip("/").split("/") if p]
+    if not parts:
+        return path
+    if parts[0] == "00-meta":
+        return "/".join(parts)
+    if parts[0] != KNOWLEDGE:
+        parts = [KNOWLEDGE] + parts
+    if len(parts) <= 3:
+        # knowledge/categoria/arquivo.md já está ok (ou knowledge/arquivo.md)
+        if len(parts) == 3:
+            return f"{KNOWLEDGE}/{slugify(parts[1])}/{parts[-1]}"
+        return "/".join(parts)
+    # profundidade > 2: colapsa. Prefere um segmento que seja categoria válida.
+    try:
+        instr = load_instructions(vault)
+        cats = parse_taxonomy(instr) if instr else []
+    except Exception:
+        cats = []
+    categoria = slugify(parts[1])
+    for seg in parts[1:-1]:
+        if slugify(seg) in cats:
+            categoria = slugify(seg)
+            break
+    return f"{KNOWLEDGE}/{categoria}/{parts[-1]}"
+
+
 # ── API de alto nível ────────────────────────────────────────────────────────────
 
 def classify_note(vault: str, note_text: str, title: str = "", summary: str = "", date: str = "") -> dict:

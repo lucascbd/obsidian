@@ -89,6 +89,7 @@ def init_db() -> None:
                 ref        TEXT,            -- msg_id / origem
                 note_path  TEXT,            -- nota relacionada no vault
                 priority   TEXT DEFAULT 'media',  -- 'alta' | 'media' | 'baixa'
+                link       TEXT,            -- link p/ a origem (ex.: abrir email no Outlook)
                 created_at TEXT,
                 done_at    TEXT
             );
@@ -120,6 +121,10 @@ def init_db() -> None:
         # Migração: adiciona priority em bancos antigos (ignora se já existe)
         try:
             c.execute("ALTER TABLE todos ADD COLUMN priority TEXT DEFAULT 'media'")
+        except Exception:
+            pass
+        try:
+            c.execute("ALTER TABLE todos ADD COLUMN link TEXT")
         except Exception:
             pass
 
@@ -189,7 +194,7 @@ def queue_len() -> int:
 # ── To-dos (extraídos de emails/reuniões + manuais) ─────────────────────────────
 
 def add_todo(vault: str, title: str, due: str = "", source: str = "", ref: str = "",
-             note_path: str = "", priority: str = "media") -> int:
+             note_path: str = "", priority: str = "media", link: str = "") -> int:
     import time
     title = (title or "").strip()
     if not title:
@@ -205,15 +210,15 @@ def add_todo(vault: str, title: str, due: str = "", source: str = "", ref: str =
             if ex:
                 return ex["id"]
         cur = c.execute(
-            "INSERT INTO todos (vault, title, due, status, source, ref, note_path, priority, created_at) "
-            "VALUES (?,?,?,'open',?,?,?,?,?)",
-            (vault, title[:300], (due or "")[:10], source, ref, note_path, priority, now_iso),
+            "INSERT INTO todos (vault, title, due, status, source, ref, note_path, priority, link, created_at) "
+            "VALUES (?,?,?,'open',?,?,?,?,?,?)",
+            (vault, title[:300], (due or "")[:10], source, ref, note_path, priority, link, now_iso),
         )
         return cur.lastrowid
 
 
 def list_todos(vault: str, status: str = None, limit: int = 200) -> list:
-    q = ("SELECT id, title, due, status, source, ref, note_path, priority, created_at, done_at "
+    q = ("SELECT id, title, due, status, source, ref, note_path, priority, link, created_at, done_at "
          "FROM todos WHERE vault=?")
     params = [vault]
     if status:

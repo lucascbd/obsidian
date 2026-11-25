@@ -597,7 +597,8 @@ INGEST_PROMPT = """Você é o Mordomo do Conhecimento. Converta o conteúdo abai
 {load_rules_section}
 
 REGRAS GERAIS (aplicar somente se não houver REGRAS DO VAULT acima):
-- Estrutura: sempre 3 níveis de hierarquia (ex: categoria/tema/nome.md)
+- Estrutura: SEMPRE no máximo 2 níveis — knowledge/{categoria}/{arquivo}.md.
+  NUNCA crie subpastas dentro de uma categoria (proibido knowledge/cat/subcat/arquivo.md).
 - Slug em lowercase com hifens, sem acentos
 - Frontmatter obrigatório: title, date ({today}), source, tags (3-5)
 - Seções com ## e ###, conteúdo em português, conciso e navegável
@@ -613,7 +614,7 @@ AÇÕES / TO-DOS:
 - Cada tarefa: objetiva, no infinitivo, com prazo se houver (YYYY-MM-DD).
 
 Responda APENAS com um JSON válido (sem texto antes ou depois):
-{{"path": "nivel1/nivel2/nivel3/nome.md", "content": "conteúdo completo da nota em markdown", "summary": "1-2 frases descrevendo o que foi criado", "todos": [{{"title": "ação objetiva", "due": "YYYY-MM-DD ou vazio"}}]}}"""
+{{"path": "knowledge/categoria/aaaa-mm-dd-nome.md", "content": "conteúdo completo da nota em markdown", "summary": "1-2 frases descrevendo o que foi criado", "todos": [{{"title": "ação objetiva", "due": "YYYY-MM-DD ou vazio"}}]}}"""
 
 
 def _find_related_for_new_note(content: str, exclude_path: str, db: str = None, threshold: float = 0.72) -> list:
@@ -656,7 +657,7 @@ def _graph_enrich_search(args: dict, db: str = None) -> str:
 
 
 def ingest(raw_text: str, source_name: str, vault: Optional[str] = None, db: str = None,
-           todo_priority: str = "media", todo_source: str = "email") -> dict:
+           todo_priority: str = "media", todo_source: str = "email", todo_link: str = "") -> dict:
     """Converte texto bruto em nota Obsidian e salva no vault.
     todo_priority: prioridade aplicada aos to-dos extraídos (alta/media/baixa)."""
     import datetime
@@ -723,6 +724,14 @@ def ingest(raw_text: str, source_name: str, vault: Optional[str] = None, db: str
         except Exception as e:
             log.warning(f"organizer (ingest): {e}")
 
+        # Guarda final de profundidade: mesmo que o organizador falhe, nunca deixa
+        # o path livre do LLM criar subpastas (knowledge/cat/subcat/arquivo.md).
+        try:
+            import organizer
+            path = organizer.enforce_structure(db, path)
+        except Exception as e:
+            log.warning(f"enforce_structure: {e}")
+
         # Auto-link: busca notas relacionadas e adiciona seção antes de salvar
         related = _find_related_for_new_note(content, path, db=db)
         if related and "## Notas Relacionadas" not in content:
@@ -746,7 +755,8 @@ def ingest(raw_text: str, source_name: str, vault: Optional[str] = None, db: str
                     title, due = td.get("title", ""), td.get("due", "")
                 if title and title.strip():
                     tid = state.add_todo(_vault(db), title, due=due, source=todo_source,
-                                         ref=path, note_path=path, priority=todo_priority)
+                                         ref=path, note_path=path, priority=todo_priority,
+                                         link=todo_link)
                     if tid:
                         state.record_event(_vault(db), actor="agent", kind="todo",
                                            summary=f"[{todo_priority}] {title}"[:200], source=todo_source, ref=path)
@@ -879,7 +889,7 @@ def process_email_payload(subject: str = "", sender: str = "", date: str = "", b
         f"{body}"
     )
     res = ingest(raw, source_name=f"email: {subject or '(sem assunto)'}", vault=vault, db=db,
-                 todo_priority=priority, todo_source="email")
+                 todo_priority=priority, todo_source="email", todo_link=web_link)
     path = res.get("path")
     if path:
         _inject_frontmatter_keys(_vault(db), path, {

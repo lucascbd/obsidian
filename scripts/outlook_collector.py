@@ -215,11 +215,14 @@ def _cycle(cfg: dict) -> str:
         subject = getattr(item, "Subject", "") or "(sem assunto)"
         sender = getattr(item, "SenderName", "") or getattr(item, "SenderEmailAddress", "") or "?"
         body = (getattr(item, "Body", "") or "")[:BODY_MAX]
+        entry_id = getattr(item, "EntryID", "") or ""
         payload = {"subject": subject, "from": sender,
                    "date": received.strftime("%Y-%m-%d %H:%M"), "body": body, "msg_id": mid,
                    "to": (getattr(item, "To", "") or "")[:500],
                    "cc": (getattr(item, "CC", "") or "")[:500],
-                   "me": _me()}
+                   "me": _me(),
+                   # Abre o email direto no Outlook desktop (protocolo outlook:<EntryID>)
+                   "web_link": ("outlook:" + entry_id) if entry_id else ""}
         print(f"  → {received:%Y-%m-%d %H:%M} [{sender}] {subject[:55]}")
         try:
             r = _send(payload)
