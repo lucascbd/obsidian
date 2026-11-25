@@ -103,16 +103,20 @@ def _skip(sender: str, subject: str, patterns: list) -> bool:
     return any(p in hay for p in patterns)
 
 
-def _processed_ids(since_date: str, source: str = "outlook") -> set:
+def _processed_ids(since_date: str, source: str = "outlook"):
+    """Retorna (set_de_ids, ok). ok=False sinaliza falha na leitura → NÃO reenviar
+    tudo às cegas (o chamador pausa, para não ficar em loop sobre os mesmos itens)."""
     try:
         r = requests.get(f"{AGENT_URL}/api/processed",
                          params={"source": source, "since": since_date},
                          headers=HEADERS, timeout=60)
         if r.status_code == 200:
-            return set(r.json().get("ids", []))
+            return set(r.json().get("ids", [])), True
+        print(f"  ⚠ /api/processed respondeu {r.status_code}: {r.text[:150]}")
+        print("     (sem a lista de processados o dedup não funciona — verifique a AGENT_API_KEY do servidor)")
     except Exception as e:
-        print("  ⚠ não consegui ler os processados do agente:", e)
-    return set()
+        print("  ⚠ não consegui ler /api/processed:", e)
+    return set(), False
 
 
 def _post(endpoint: str, payload: dict) -> str:
@@ -134,7 +138,12 @@ def _send(payload: dict) -> str:
 
 def _cycle(cfg: dict) -> str:
     window = datetime.datetime.now() - datetime.timedelta(days=cfg["backfill"])
-    done = _processed_ids(window.strftime("%Y-%m-%d"))
+    done, ok = _processed_ids(window.strftime("%Y-%m-%d"))
+    if not ok:
+        # Sem a lista de processados, reenviar tudo = loop sobre os mesmos emails.
+        print("  ⏸ pulo este ciclo até conseguir ler os processados do agente.")
+        return "idle"
+    print(f"  {len(done)} email(s) já processado(s) no agente (dedup).")
     patterns = cfg.get("skip", [])
     skipped = 0
 
@@ -205,7 +214,10 @@ def _cycle_calendar(cfg: dict):
         return
     now = datetime.datetime.now()
     ws, we = now - datetime.timedelta(days=past), now + datetime.timedelta(days=fut)
-    done = _processed_ids(ws.strftime("%Y-%m-%d"), source="calendar")
+    done, ok = _processed_ids(ws.strftime("%Y-%m-%d"), source="calendar")
+    if not ok:
+        print("  ⏸ pulo o calendário até conseguir ler os processados do agente.")
+        return
 
     try:
         items = _folder(OL_CALENDAR).Items
