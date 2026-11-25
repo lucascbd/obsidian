@@ -28,7 +28,10 @@ class LLMRateLimited(Exception):
 
 _RATE_KEYS = ("rate limit", "rate_limit", "ratelimit", "429", "usage limit",
               "usage_limit", "quota", "exceeded", "overloaded", "resource_exhausted",
-              "too many requests", "limit reached", "try again later")
+              "too many requests", "limit reached", "try again later",
+              # Mensagens da assinatura Claude Pro/Code (limite de 5h / semanal):
+              # "You've hit your 5-hour limit · resets 2:50pm" / "weekly limit"
+              "hit your", "hour limit", "weekly limit", "· resets", "limit ·")
 
 
 def _is_rate_limit(msg: str) -> bool:
@@ -236,8 +239,13 @@ async def _complete_async(system: str, user: str) -> str:
             for block in msg.content:
                 if isinstance(block, TextBlock) and block.text:
                     out = block.text
-        elif isinstance(msg, ResultMessage) and getattr(msg, "result", None):
-            out = msg.result
+        elif isinstance(msg, ResultMessage):
+            res = getattr(msg, "result", None)
+            if res:
+                out = res
+            # O SDK às vezes reporta o limite como ResultMessage de erro (sem exceção).
+            if getattr(msg, "is_error", False) and _is_rate_limit(str(res or "")):
+                raise LLMRateLimited(str(res))
     return out
 
 
