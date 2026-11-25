@@ -445,7 +445,7 @@ HTML = """<!DOCTYPE html>
         var due=t.due?(' · <span style="color:var(--amber)">'+t.due+'</span>'):'';
         var prio=t.priority||'media';
         var dot='<span class="prio-dot" title="'+prio+'" style="background:'+(PC[prio]||PC.media)+'"></span>';
-        var link=t.link?('<a class="todo-link" href="'+escapeHtml(t.link)+'" title="Abrir no Outlook">📧 abrir</a>'):'';
+        var link=t.link?('<a class="todo-link" href="'+escapeHtml(t.link)+'" target="_blank" rel="noopener" title="Abrir no Outlook (web)">📧 abrir</a>'):'';
         div.innerHTML=
           '<button class="todo-check" onclick="doneTodo('+t.id+',this)" title="Concluir">✓</button>'+
           dot+

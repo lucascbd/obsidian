@@ -32,9 +32,11 @@ USO:
 """
 
 import os
+import re
 import sys
 import time
 import datetime
+import urllib.parse
 
 # TLS da rede corporativa (MITM) → usa o trust store do Windows.
 try:
@@ -215,14 +217,17 @@ def _cycle(cfg: dict) -> str:
         subject = getattr(item, "Subject", "") or "(sem assunto)"
         sender = getattr(item, "SenderName", "") or getattr(item, "SenderEmailAddress", "") or "?"
         body = (getattr(item, "Body", "") or "")[:BODY_MAX]
-        entry_id = getattr(item, "EntryID", "") or ""
+        # Link web (OWA, melhor esforço): abre o Outlook na web com a busca do assunto.
+        # Sem Microsoft Graph não dá para montar o link exato do item; a busca costuma
+        # cair direto no email. Limpamos prefixos RE:/FW:/ENC: para a busca ser mais certeira.
+        _q = re.sub(r"(?i)^\s*(re|fw|fwd|enc|res)\s*:\s*", "", subject).strip() or subject
+        web_link = "https://outlook.office.com/mail/deeplink/search?query=" + urllib.parse.quote(_q[:120])
         payload = {"subject": subject, "from": sender,
                    "date": received.strftime("%Y-%m-%d %H:%M"), "body": body, "msg_id": mid,
                    "to": (getattr(item, "To", "") or "")[:500],
                    "cc": (getattr(item, "CC", "") or "")[:500],
                    "me": _me(),
-                   # Abre o email direto no Outlook desktop (protocolo outlook:<EntryID>)
-                   "web_link": ("outlook:" + entry_id) if entry_id else ""}
+                   "web_link": web_link}
         print(f"  → {received:%Y-%m-%d %H:%M} [{sender}] {subject[:55]}")
         try:
             r = _send(payload)
