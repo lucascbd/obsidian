@@ -655,8 +655,10 @@ def _graph_enrich_search(args: dict, db: str = None) -> str:
         return raw
 
 
-def ingest(raw_text: str, source_name: str, vault: Optional[str] = None, db: str = None) -> dict:
-    """Converte texto bruto em nota Obsidian e salva no vault."""
+def ingest(raw_text: str, source_name: str, vault: Optional[str] = None, db: str = None,
+           todo_priority: str = "media", todo_source: str = "email") -> dict:
+    """Converte texto bruto em nota Obsidian e salva no vault.
+    todo_priority: prioridade aplicada aos to-dos extraídos (alta/media/baixa)."""
     import datetime
     db = db or vault  # vault name == subdiretório em disco
     note_ids = tool_list_notes(db=db)
@@ -743,11 +745,11 @@ def ingest(raw_text: str, source_name: str, vault: Optional[str] = None, db: str
                 else:
                     title, due = td.get("title", ""), td.get("due", "")
                 if title and title.strip():
-                    tid = state.add_todo(_vault(db), title, due=due, source="email",
-                                         ref=path, note_path=path)
+                    tid = state.add_todo(_vault(db), title, due=due, source=todo_source,
+                                         ref=path, note_path=path, priority=todo_priority)
                     if tid:
                         state.record_event(_vault(db), actor="agent", kind="todo",
-                                           summary=f"To-do: {title}"[:200], source="email", ref=path)
+                                           summary=f"[{todo_priority}] {title}"[:200], source=todo_source, ref=path)
         except Exception as e:
             log.warning(f"ingest todos: {e}")
 
@@ -784,32 +786,59 @@ def _inject_frontmatter_keys(vault: str, note_id: str, keys: dict) -> None:
 
 def ingest_email(subject: str, sender: str, date: str, body: str,
                  msg_id: str = "", web_link: str = "", vault: Optional[str] = None,
-                 db: str = None) -> dict:
+                 db: str = None, to: str = "", cc: str = "", me: str = "") -> dict:
     """Destila um email em nota do vault (conhecimento destilado + ponteiro p/ a fonte).
     Reaproveita o pipeline de ingestão (LLM distila → nota → auto-link → watcher indexa)."""
     # Enfileira para processamento assíncrono (resposta rápida; sem timeout de proxy).
     if msg_id and state.is_processed("outlook", msg_id):
         return {"queued": False, "skipped": True, "answer": "(email já processado)"}
     payload = {"subject": subject, "sender": sender, "date": date, "body": body,
-               "msg_id": msg_id, "web_link": web_link, "vault": vault or db}
+               "msg_id": msg_id, "web_link": web_link, "vault": vault or db,
+               "to": to, "cc": cc, "me": me}
     state.enqueue("outlook", msg_id, payload)
     if msg_id:
         state.mark_processed("outlook", msg_id, item_date=date, status="pending")
     return {"queued": True, "answer": "enfileirado"}
 
 
+def _email_priority(me: str, to: str, cc: str, subject: str, body: str) -> str:
+    """Prioridade determinística (sem LLM) a partir do papel do usuário no email.
+    - No campo Para (direto) → alta ; só em Cópia (CC) → media ; citado pelo nome → bump."""
+    me = (me or "").strip().lower()
+    to_l, cc_l = (to or "").lower(), (cc or "").lower()
+    if not me:
+        return "media"
+    first = me.split()[0] if me else ""
+    in_to = me in to_l or (first and first in to_l)
+    in_cc = me in cc_l or (first and first in cc_l)
+    # "central": único (ou primeiro) destinatário no Para
+    sole_to = in_to and to_l.strip().strip(";").count(";") == 0
+    mentioned = bool(first) and first in (f"{subject} {body}").lower()
+    if sole_to or in_to:
+        return "alta"
+    if in_cc:
+        return "media" if not mentioned else "alta"
+    if mentioned:
+        return "media"
+    return "baixa"
+
+
 def process_email_payload(subject: str = "", sender: str = "", date: str = "", body: str = "",
                           msg_id: str = "", web_link: str = "", vault: Optional[str] = None,
-                          db: str = None) -> dict:
+                          db: str = None, to: str = "", cc: str = "", me: str = "") -> dict:
     """Destila de fato um email (chamado pelo worker). Pode levantar LLMRateLimited."""
     db = db or vault
+    priority = _email_priority(me, to, cc, subject, body)
     raw = (
         f"Assunto: {subject}\n"
         f"De: {sender}\n"
+        f"Para: {to}\n"
+        f"Cc: {cc}\n"
         f"Data: {date}\n\n"
         f"{body}"
     )
-    res = ingest(raw, source_name=f"email: {subject or '(sem assunto)'}", vault=vault, db=db)
+    res = ingest(raw, source_name=f"email: {subject or '(sem assunto)'}", vault=vault, db=db,
+                 todo_priority=priority, todo_source="email")
     path = res.get("path")
     if path:
         _inject_frontmatter_keys(_vault(db), path, {
@@ -817,12 +846,14 @@ def process_email_payload(subject: str = "", sender: str = "", date: str = "", b
             "msg_id":     msg_id,
             "from":       sender,
             "email_date": date,
+            "priority":   priority,
             "web_link":   web_link,
         })
         state.record_event(_vault(db), actor="agent", kind="email",
-                           summary=f"Email de {sender}: {subject}"[:200],
+                           summary=f"[{priority}] Email de {sender}: {subject}"[:200],
                            source="outlook", ref=msg_id or path)
-    return {"path": path, "answer": res.get("answer", ""), "sources": res.get("sources", [])}
+    return {"path": path, "priority": priority, "answer": res.get("answer", ""),
+            "sources": res.get("sources", [])}
 
 
 def enqueue_event(subject: str = "", start: str = "", end: str = "", organizer: str = "",

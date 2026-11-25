@@ -112,8 +112,9 @@ HTML = """<!DOCTYPE html>
   .c-btn{font-size:11px;padding:4px 10px;border-radius:7px;border:1px solid var(--border);cursor:pointer;background:var(--surface);color:var(--label)}
   .c-btn.ok{background:var(--green);color:#06281c;border-color:transparent}
   .c-btn:hover{filter:brightness(1.1)}
-  .todo-item{display:flex;align-items:flex-start;gap:9px;font-size:13px;color:var(--text)}
+  .todo-item{display:flex;align-items:flex-start;gap:8px;font-size:13px;color:var(--text)}
   .todo-item input{margin-top:3px}
+  .prio-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;margin-top:5px}
 
   /* ── Modais ── */
   .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:50}
@@ -409,10 +410,13 @@ HTML = """<!DOCTYPE html>
       var todos=d.todos||[];cnt.textContent=todos.length;
       if(!todos.length){body.innerHTML='<div class="tile-empty"><div class="big">✅</div>Nenhuma tarefa aberta. Tarefas extraídas dos seus emails aparecem aqui.</div>';return;}
       body.innerHTML='';
+      var pc={alta:'var(--red)',media:'var(--amber)',baixa:'var(--muted)'};
       todos.forEach(function(t){
         var div=document.createElement('div');div.className='todo-item';
         var due=t.due?(' · <span style="color:var(--amber)">'+t.due+'</span>'):'';
-        div.innerHTML='<input type="checkbox" onchange="doneTodo('+t.id+',this)"><div><div>'+escapeHtml(t.title)+'</div><div style="font-size:11px;color:var(--muted)">'+(t.source||'')+due+'</div></div>';
+        var prio=t.priority||'media';
+        var dot='<span class="prio-dot" title="'+prio+'" style="background:'+(pc[prio]||pc.media)+'"></span>';
+        div.innerHTML='<input type="checkbox" onchange="doneTodo('+t.id+',this)">'+dot+'<div><div>'+escapeHtml(t.title)+'</div><div style="font-size:11px;color:var(--muted)">'+prio+' · '+(t.source||'')+due+'</div></div>';
         body.appendChild(div);
       });
     }catch(e){}
@@ -428,7 +432,7 @@ HTML = """<!DOCTYPE html>
   document.addEventListener('keydown',function(e){if(e.key==='Escape'){closeSettings();}});
   loadVault();
   loadTodos();
-  setInterval(loadTodos, 60000);  // atualiza a cada 1 min (novos emails viram to-dos)
+  setInterval(loadTodos, 15000);  // refresh "live" a cada 15s (novos to-dos aparecem sozinhos)
 </script>
 </body>
 </html>
@@ -828,6 +832,7 @@ def api_ingest_email():
         date=data.get("date", ""), body=data.get("body", ""),
         msg_id=data.get("msg_id", ""), web_link=data.get("web_link", ""),
         vault=data.get("vault") or None,
+        to=data.get("to", ""), cc=data.get("cc", ""), me=data.get("me", ""),
     )
     return jsonify(res), 202
 

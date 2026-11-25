@@ -87,6 +87,20 @@ def _inbox():
     return _folder(OL_INBOX)
 
 
+_ME_CACHE = {"name": None}
+
+
+def _me():
+    """Nome de exibição do usuário (p/ o agente julgar prioridade: Para vs Cc vs citado)."""
+    if _ME_CACHE["name"] is None:
+        try:
+            outlook = win32com.client.Dispatch("Outlook.Application")
+            _ME_CACHE["name"] = outlook.GetNamespace("MAPI").CurrentUser.Name or ""
+        except Exception:
+            _ME_CACHE["name"] = ""
+    return _ME_CACHE["name"]
+
+
 def _config() -> dict:
     """Lê intervalo/backfill/filtro do agente; env tem prioridade quando definido."""
     poll, backfill, skip = 300, 0, []
@@ -202,7 +216,10 @@ def _cycle(cfg: dict) -> str:
         sender = getattr(item, "SenderName", "") or getattr(item, "SenderEmailAddress", "") or "?"
         body = (getattr(item, "Body", "") or "")[:BODY_MAX]
         payload = {"subject": subject, "from": sender,
-                   "date": received.strftime("%Y-%m-%d %H:%M"), "body": body, "msg_id": mid}
+                   "date": received.strftime("%Y-%m-%d %H:%M"), "body": body, "msg_id": mid,
+                   "to": (getattr(item, "To", "") or "")[:500],
+                   "cc": (getattr(item, "CC", "") or "")[:500],
+                   "me": _me()}
         print(f"  → {received:%Y-%m-%d %H:%M} [{sender}] {subject[:55]}")
         try:
             r = _send(payload)
