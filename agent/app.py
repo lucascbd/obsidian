@@ -434,6 +434,16 @@ HTML = """<!DOCTYPE html>
   var todoHistory=false;
   var PC={alta:'var(--red)',media:'var(--amber)',baixa:'var(--muted)'};
   function escapeHtml(s){var d=document.createElement('div');d.textContent=s||'';return d.innerHTML;}
+  // Abre o email: protocolo (outlook:) é entregue ao handler do Windows sem abrir
+  // aba em branco; links http abrem em nova aba.
+  function openMailLink(url){
+    if(/^https?:/i.test(url)){window.open(url,'_blank','noopener');return;}
+    try{
+      var f=document.createElement('iframe');f.style.display='none';f.src=url;
+      document.body.appendChild(f);
+      setTimeout(function(){try{document.body.removeChild(f);}catch(e){}},1500);
+    }catch(e){window.location.href=url;}
+  }
   function toggleTodoHistory(){
     todoHistory=!todoHistory;
     var b=document.getElementById('todo-hist-btn');if(b)b.classList.toggle('on',todoHistory);
@@ -452,7 +462,7 @@ HTML = """<!DOCTYPE html>
         var due=t.due?(' · <span style="color:var(--amber)">'+t.due+'</span>'):'';
         var prio=t.priority||'media';
         var dot='<span class="prio-dot" title="'+prio+'" style="background:'+(PC[prio]||PC.media)+'"></span>';
-        var link=t.link?('<a class="todo-link" href="'+escapeHtml(t.link)+'" target="_blank" rel="noopener" title="Abrir no Outlook (web)">📧 abrir</a>'):'';
+        var link=t.link?('<a class="todo-link" href="'+escapeHtml(t.link)+'" onclick="openMailLink(this.href);return false;" title="Abrir no Outlook">📧 abrir</a>'):'';
         div.innerHTML=
           '<button class="todo-check" onclick="doneTodo('+t.id+',this)" title="Concluir">✓</button>'+
           dot+
