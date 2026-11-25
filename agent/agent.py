@@ -836,6 +836,39 @@ def _email_priority(me: str, to: str, cc: str, subject: str, body: str) -> str:
     return "baixa"
 
 
+# Remetentes que nunca merecem rascunho automático (ruído transacional/broadcast).
+_NOREPLY_RE   = re.compile(r"(?i)(no.?reply|do.?not.?reply|n[aã]o.?responda|noreply|donotreply|"
+                           r"postmaster|mailer-?daemon|notifica[cç]|newsletter|automat|auto-?confirm)")
+_BROADCAST_RE = re.compile(r"(?i)(internal.?comm|comunica[cç][aã]o interna|global comms|global comm|"
+                           r"announce|broadcast|comunicados?\b|all.?staff|all.?employees)")
+_AUTOSUBJ_RE  = re.compile(r"(?i)(automatic reply|out of office|auto.?reply|resposta autom[aá]tica|"
+                           r"fora do escrit[oó]rio|aus[eê]ncia|on vacation|f[eé]rias)")
+
+
+def _should_autodraft(me: str, sender: str, to: str, cc: str, subject: str, body: str) -> bool:
+    """Decide se vale gerar rascunho automático. A INGESTÃO não é afetada — só o draft.
+    Suprime: no-reply/notificações, auto-replies, comunicados/broadcast, email de massa
+    e qualquer remetente/destinatário na lista 'never_draft' do usuário."""
+    try:
+        from core.settings import get_settings
+        never = get_settings().get("never_draft", []) or []
+    except Exception:
+        never = []
+    hay = f"{sender} {to} {cc}".lower()
+    if any(p and p in hay for p in never):
+        return False
+    s = sender or ""
+    if _NOREPLY_RE.search(s) or _BROADCAST_RE.search(s):
+        return False
+    if _AUTOSUBJ_RE.search(subject or ""):
+        return False
+    # Email de massa (comunicado/lista de distribuição): muitos destinatários visíveis.
+    n = len([x for x in re.split(r"[;,]", f"{to};{cc}") if x.strip()])
+    if n >= 8:
+        return False
+    return True
+
+
 DRAFT_SYSTEM = (
     "Você redige um RASCUNHO de resposta de email em nome do usuário (o Mordomo do "
     "Conhecimento). Escreva NA MESMA LÍNGUA do email original (inglês→inglês, "
@@ -907,8 +940,9 @@ def process_email_payload(subject: str = "", sender: str = "", date: str = "", b
         state.record_event(_vault(db), actor="agent", kind="email",
                            summary=f"[{priority}] Email de {sender}: {subject}"[:200],
                            source="outlook", ref=msg_id or path)
-        # Auto-rascunho de resposta SÓ para prioridade alta (best-effort; não falha o email).
-        if priority == "alta":
+        # Auto-rascunho SÓ para prioridade alta E que pareça pedir resposta pessoal
+        # (comunicados globais, no-reply, auto-replies e lista never_draft são poupados).
+        if priority == "alta" and _should_autodraft(me, sender, to, cc, subject, body):
             try:
                 generate_reply_draft(_vault(db), path, subject, sender, ref=msg_id,
                                      priority=priority, db=db)

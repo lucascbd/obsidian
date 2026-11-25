@@ -22,6 +22,10 @@ _DEFAULTS = {
     # Vazio = processa tudo. Curado por você — RH/learning/reuniões passam a menos
     # que você adicione aqui.
     "skip_patterns": [],
+    # "Never draft": remetentes/destinatários/domínios que NUNCA devem gerar
+    # rascunho de resposta automática (ex.: comunicados globais, listas de
+    # distribuição). A ingestão continua normal — só o draft é suprimido.
+    "never_draft": [],
 }
 
 _VALID_MODELS = {"sonnet", "opus", "haiku"}
@@ -62,6 +66,9 @@ def save_settings(patch: dict) -> dict:
         if "skip_patterns" in patch and isinstance(patch["skip_patterns"], list):
             data["skip_patterns"] = [str(p).strip().lower() for p in patch["skip_patterns"]
                                      if str(p).strip()][:200]
+        if "never_draft" in patch and isinstance(patch["never_draft"], list):
+            data["never_draft"] = [str(p).strip().lower() for p in patch["never_draft"]
+                                   if str(p).strip()][:200]
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         _SETTINGS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return data

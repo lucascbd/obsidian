@@ -242,6 +242,12 @@ HTML = """<!DOCTYPE html>
       <div class="hint">Emails cujo remetente ou assunto contenham qualquer um destes trechos são ignorados (sem gastar LLM). Vazio = processa tudo. RH, learning, convites e reuniões passam a menos que você os adicione aqui.</div>
     </div>
 
+    <div class="field">
+      <label>Nunca gerar rascunho (um por linha)</label>
+      <textarea id="set-neverdraft" rows="4" placeholder="remetente, destinatário ou domínio, ex:&#10;comunicação interna&#10;internal communications&#10;@newsletter.haleon.com"></textarea>
+      <div class="hint">Estes <b>continuam virando nota</b> (você pode me pedir resumo), mas <b>nunca</b> geram rascunho de resposta automático. Use para comunicados globais, listas de distribuição, etc. No-reply, auto-replies e emails de massa já são poupados automaticamente.</div>
+    </div>
+
     <div class="sec">
       <div class="sec-title">Manutenção do Obsidian</div>
       <div class="hint">Nos horários abaixo, roda a manutenção de garantia do vault (sem custo de LLM): <b>correlaciona</b> as notas (links "Notas Relacionadas") e <b>regenera os índices</b> (00-meta/indices). A busca semântica (ChromaDB) já é mantida em dia pelo watcher — isto <b>não</b> rebuilda o ChromaDB. Horários em hora do servidor.</div>
@@ -393,14 +399,15 @@ HTML = """<!DOCTYPE html>
   function addTime(){var t=document.getElementById('new-time').value;if(t&&_times.indexOf(t)<0){_times.push(t);_times.sort();renderTimes();}}
   function rmTime(i){_times.splice(i,1);renderTimes();}
   async function openSettings(){
-    try{var r=await fetch('/api/settings');var d=await r.json();document.getElementById('set-model').value=d.model||'sonnet';document.getElementById('set-poll').value=d.poll_seconds||300;document.getElementById('set-skip').value=(d.skip_patterns||[]).join('\\n');_times=(d.reindex_times||[]).slice();}
+    try{var r=await fetch('/api/settings');var d=await r.json();document.getElementById('set-model').value=d.model||'sonnet';document.getElementById('set-poll').value=d.poll_seconds||300;document.getElementById('set-skip').value=(d.skip_patterns||[]).join('\\n');document.getElementById('set-neverdraft').value=(d.never_draft||[]).join('\\n');_times=(d.reindex_times||[]).slice();}
     catch(e){_times=[];}
     renderTimes();document.getElementById('settings-modal').classList.add('open');
   }
   function closeSettings(){document.getElementById('settings-modal').classList.remove('open');}
   async function saveSettings(){
     var skip=document.getElementById('set-skip').value.split('\\n').map(function(s){return s.trim();}).filter(function(s){return s;});
-    var body={model:document.getElementById('set-model').value,reindex_times:_times,poll_seconds:parseInt(document.getElementById('set-poll').value)||300,skip_patterns:skip};
+    var nd=document.getElementById('set-neverdraft').value.split('\\n').map(function(s){return s.trim();}).filter(function(s){return s;});
+    var body={model:document.getElementById('set-model').value,reindex_times:_times,poll_seconds:parseInt(document.getElementById('set-poll').value)||300,skip_patterns:skip,never_draft:nd};
     try{await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});}catch(e){}
     closeSettings();appendMsg('agent','⚙️ Configurações salvas. Modelo: '+body.model+(body.reindex_times.length?(' · reindex: '+body.reindex_times.join(', ')):''));
   }
