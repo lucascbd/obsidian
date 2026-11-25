@@ -434,15 +434,11 @@ HTML = """<!DOCTYPE html>
   var todoHistory=false;
   var PC={alta:'var(--red)',media:'var(--amber)',baixa:'var(--muted)'};
   function escapeHtml(s){var d=document.createElement('div');d.textContent=s||'';return d.innerHTML;}
-  // Abre o email: protocolo (outlook:) é entregue ao handler do Windows sem abrir
-  // aba em branco; links http abrem em nova aba.
+  // Abre o email: protocolo próprio (obsmail:/outlook:) é entregue ao handler do
+  // Windows via window.location (gesto do usuário, sem abrir aba); http abre em nova aba.
   function openMailLink(url){
     if(/^https?:/i.test(url)){window.open(url,'_blank','noopener');return;}
-    try{
-      var f=document.createElement('iframe');f.style.display='none';f.src=url;
-      document.body.appendChild(f);
-      setTimeout(function(){try{document.body.removeChild(f);}catch(e){}},1500);
-    }catch(e){window.location.href=url;}
+    window.location.href=url;
   }
   function toggleTodoHistory(){
     todoHistory=!todoHistory;

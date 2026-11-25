@@ -215,10 +215,11 @@ def _cycle(cfg: dict) -> str:
         subject = getattr(item, "Subject", "") or "(sem assunto)"
         sender = getattr(item, "SenderName", "") or getattr(item, "SenderEmailAddress", "") or "?"
         body = (getattr(item, "Body", "") or "")[:BODY_MAX]
-        # Abre o email direto no Outlook clássico (desktop) via protocolo outlook:<EntryID>.
-        # O frontend invoca o handler sem abrir aba em branco.
+        # Abre o email no Outlook clássico via protocolo próprio obsmail:<EntryID>.
+        # Registre o protocolo no PC uma vez com scripts/install-outlook-link.bat
+        # (usa a API COM do Outlook: GetItemFromID → abre o email exato).
         entry_id = getattr(item, "EntryID", "") or ""
-        web_link = ("outlook:" + entry_id) if entry_id else ""
+        web_link = ("obsmail:" + entry_id) if entry_id else ""
         payload = {"subject": subject, "from": sender,
                    "date": received.strftime("%Y-%m-%d %H:%M"), "body": body, "msg_id": mid,
                    "to": (getattr(item, "To", "") or "")[:500],
