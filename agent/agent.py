@@ -599,9 +599,12 @@ INGEST_PROMPT = """Você é o Mordomo do Conhecimento. Converta o conteúdo abai
 REGRAS GERAIS (aplicar somente se não houver REGRAS DO VAULT acima):
 - Estrutura: SEMPRE no máximo 2 níveis — knowledge/{categoria}/{arquivo}.md.
   NUNCA crie subpastas dentro de uma categoria (proibido knowledge/cat/subcat/arquivo.md).
-- Slug em lowercase com hifens, sem acentos
-- Frontmatter obrigatório: title, date ({today}), source, tags (3-5)
-- Seções com ## e ###, conteúdo em português, conciso e navegável
+- Slug do ARQUIVO (nome .md) sempre em lowercase com hifens e sem acentos, seja qual for a língua.
+- Frontmatter obrigatório: title, date ({today}), source, tags (3-5). As CHAVES ficam em inglês;
+  os VALORES (título, tags) seguem a língua do conteúdo original.
+- Seções com ## e ###, conciso e navegável.
+- LÍNGUA: escreva o corpo da nota NA MESMA LÍNGUA do conteúdo original — inglês→inglês,
+  português→pt-BR, espanhol→espanhol, etc. NÃO traduza.
 - Wiki links com alias: [[caminho/nota|Nome Visível]]
 
 NOTAS EXISTENTES NO VAULT:
@@ -611,7 +614,7 @@ AÇÕES / TO-DOS:
 - Extraia APENAS tarefas acionáveis para MIM (o leitor): algo que EU preciso fazer.
 - Ex.: "responder fulano até sexta", "fazer o treinamento obrigatório X", "revisar a base Y".
 - NÃO invente tarefas; se o conteúdo é só informativo (newsletter, confirmação), deixe a lista vazia.
-- Cada tarefa: objetiva, no infinitivo, com prazo se houver (YYYY-MM-DD).
+- Cada tarefa: objetiva, com prazo se houver (YYYY-MM-DD), NA MESMA LÍNGUA do conteúdo original.
 
 Responda APENAS com um JSON válido (sem texto antes ou depois):
 {{"path": "knowledge/categoria/aaaa-mm-dd-nome.md", "content": "conteúdo completo da nota em markdown", "summary": "1-2 frases descrevendo o que foi criado", "todos": [{{"title": "ação objetiva", "due": "YYYY-MM-DD ou vazio"}}]}}"""
@@ -835,8 +838,9 @@ def _email_priority(me: str, to: str, cc: str, subject: str, body: str) -> str:
 
 DRAFT_SYSTEM = (
     "Você redige um RASCUNHO de resposta de email em nome do usuário (o Mordomo do "
-    "Conhecimento). Escreva em português, tom profissional e objetivo, pronto para o "
-    "usuário revisar e enviar. Use o resumo do email e o contexto do vault quando ajudar; "
+    "Conhecimento). Escreva NA MESMA LÍNGUA do email original (inglês→inglês, "
+    "português→pt-BR, espanhol→espanhol); não traduza. Tom profissional e objetivo, pronto "
+    "para o usuário revisar e enviar. Use o resumo do email e o contexto do vault quando ajudar; "
     "NÃO invente fatos. Se faltar informação para responder, deixe um marcador claro como "
     "[confirmar X]. Responda SOMENTE com o corpo do email (sem assunto, sem JSON)."
 )

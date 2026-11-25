@@ -39,6 +39,13 @@ HTML = """<!DOCTYPE html>
     --green:#3ecf8e; --amber:#f5a623; --red:#ef4e6b;
   }
   *{box-sizing:border-box;margin:0;padding:0}
+  /* Scrollbar no tema dark — fina, arredondada, discreta */
+  *{scrollbar-width:thin;scrollbar-color:var(--border) transparent}
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-track{background:transparent}
+  ::-webkit-scrollbar-thumb{background:var(--border);border:2px solid transparent;background-clip:padding-box;border-radius:8px}
+  ::-webkit-scrollbar-thumb:hover{background:var(--muted);border:2px solid transparent;background-clip:padding-box}
+  ::-webkit-scrollbar-corner{background:transparent}
   body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);height:100vh;display:flex;flex-direction:column;overflow:hidden}
   header{border-bottom:1px solid var(--border);padding:12px 20px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
   header .brand{display:flex;align-items:center;gap:10px}
@@ -438,7 +445,7 @@ HTML = """<!DOCTYPE html>
         var due=t.due?(' · <span style="color:var(--amber)">'+t.due+'</span>'):'';
         var prio=t.priority||'media';
         var dot='<span class="prio-dot" title="'+prio+'" style="background:'+(PC[prio]||PC.media)+'"></span>';
-        var link=t.link?('<a class="todo-link" href="'+escapeHtml(t.link)+'" target="_blank" rel="noopener" title="Abrir no Outlook">📧 abrir</a>'):'';
+        var link=t.link?('<a class="todo-link" href="'+escapeHtml(t.link)+'" title="Abrir no Outlook">📧 abrir</a>'):'';
         div.innerHTML=
           '<button class="todo-check" onclick="doneTodo('+t.id+',this)" title="Concluir">✓</button>'+
           dot+
