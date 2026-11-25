@@ -93,6 +93,20 @@ def init_db() -> None:
                 done_at    TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_todos_status ON todos (vault, status);
+            CREATE TABLE IF NOT EXISTS drafts (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                vault      TEXT,
+                source     TEXT,            -- 'email' | 'teams'
+                ref        TEXT,            -- msg_id da origem
+                reply_to   TEXT,            -- destinatário sugerido (remetente original)
+                subject    TEXT,
+                body       TEXT,            -- rascunho (texto)
+                status     TEXT DEFAULT 'pending',  -- 'pending' | 'sent' | 'dismissed'
+                note_path  TEXT,
+                priority   TEXT DEFAULT 'media',
+                created_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_drafts_status ON drafts (vault, status);
             CREATE TABLE IF NOT EXISTS ingest_queue (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 source     TEXT NOT NULL,
@@ -224,6 +238,57 @@ def set_todo_status(todo_id: int, status: str) -> None:
 def count_todos(vault: str, status: str = "open") -> int:
     with _conn() as c:
         return c.execute("SELECT COUNT(*) AS n FROM todos WHERE vault=? AND status=?",
+                         (vault, status)).fetchone()["n"]
+
+
+# ── Rascunhos de resposta (email/Teams) ─────────────────────────────────────────
+
+def has_draft(vault: str, ref: str) -> bool:
+    if not ref:
+        return False
+    with _conn() as c:
+        row = c.execute("SELECT 1 FROM drafts WHERE vault=? AND ref=? AND status!='dismissed'",
+                        (vault, ref)).fetchone()
+    return row is not None
+
+
+def add_draft(vault: str, source: str, ref: str, subject: str, body: str,
+              reply_to: str = "", note_path: str = "", priority: str = "media") -> int:
+    import time
+    if ref and has_draft(vault, ref):
+        return 0
+    now_iso = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    with _lock, _conn() as c:
+        cur = c.execute(
+            "INSERT INTO drafts (vault, source, ref, reply_to, subject, body, status, note_path, priority, created_at) "
+            "VALUES (?,?,?,?,?,?,'pending',?,?,?)",
+            (vault, source, ref, reply_to, (subject or "")[:300], body or "", note_path, priority, now_iso),
+        )
+        return cur.lastrowid
+
+
+def list_drafts(vault: str, status: str = "pending", limit: int = 100) -> list:
+    q = ("SELECT id, source, ref, reply_to, subject, body, status, note_path, priority, created_at "
+         "FROM drafts WHERE vault=?")
+    params = [vault]
+    if status:
+        q += " AND status=?"
+        params.append(status)
+    q += (" ORDER BY CASE priority WHEN 'alta' THEN 0 WHEN 'media' THEN 1 ELSE 2 END, id DESC LIMIT ?")
+    params.append(limit)
+    with _conn() as c:
+        rows = c.execute(q, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def set_draft_status(draft_id: int, status: str) -> None:
+    with _lock, _conn() as c:
+        c.execute("UPDATE drafts SET status=? WHERE id=?", (status, draft_id))
+
+
+def count_drafts(vault: str, status: str = "pending") -> int:
+    with _conn() as c:
+        return c.execute("SELECT COUNT(*) AS n FROM drafts WHERE vault=? AND status=?",
                          (vault, status)).fetchone()["n"]
 
 

@@ -823,6 +823,47 @@ def _email_priority(me: str, to: str, cc: str, subject: str, body: str) -> str:
     return "baixa"
 
 
+DRAFT_SYSTEM = (
+    "Você redige um RASCUNHO de resposta de email em nome do usuário (o Mordomo do "
+    "Conhecimento). Escreva em português, tom profissional e objetivo, pronto para o "
+    "usuário revisar e enviar. Use o resumo do email e o contexto do vault quando ajudar; "
+    "NÃO invente fatos. Se faltar informação para responder, deixe um marcador claro como "
+    "[confirmar X]. Responda SOMENTE com o corpo do email (sem assunto, sem JSON)."
+)
+
+
+def generate_reply_draft(vault: str, note_path: str, subject: str, reply_to: str,
+                         ref: str = "", priority: str = "media", db: str = None) -> dict:
+    """Gera um rascunho de resposta a partir da nota destilada + contexto do vault.
+    Pode levantar LLMRateLimited (chamada única ao LLM)."""
+    v = _vault(db or vault)
+    try:
+        note = tool_read_note(note_path, db=v) if note_path else ""
+    except Exception:
+        note = ""
+    # Contexto relevante do vault (sem reler tudo)
+    ctx = ""
+    try:
+        raw = tool_search_vault(subject or (note[:80]), db=v)
+        results = json.loads(raw) if raw.startswith("[") else []
+        ctx = "\n\n".join(f"- {r.get('title','')}: {r.get('excerpt','')[:300]}" for r in results[:4])
+    except Exception:
+        pass
+    user = (
+        f"EMAIL (resumo destilado):\n{note[:3000]}\n\n"
+        f"CONTEXTO DO VAULT (pode ajudar):\n{ctx or '(sem contexto relevante)'}\n\n"
+        f"Escreva o rascunho de resposta para {reply_to or 'o remetente'}."
+    )
+    body = _call_llm_raw([{"role": "system", "content": DRAFT_SYSTEM}, {"role": "user", "content": user}])
+    subj = subject if subject.lower().startswith("re:") else f"Re: {subject}"
+    did = state.add_draft(v, source="email", ref=ref, subject=subj, body=body,
+                          reply_to=reply_to, note_path=note_path, priority=priority)
+    if did:
+        state.record_event(v, actor="agent", kind="draft",
+                           summary=f"Rascunho de resposta: {subj}"[:200], source="email", ref=ref)
+    return {"id": did, "subject": subj, "body": body, "reply_to": reply_to}
+
+
 def process_email_payload(subject: str = "", sender: str = "", date: str = "", body: str = "",
                           msg_id: str = "", web_link: str = "", vault: Optional[str] = None,
                           db: str = None, to: str = "", cc: str = "", me: str = "") -> dict:
@@ -852,6 +893,15 @@ def process_email_payload(subject: str = "", sender: str = "", date: str = "", b
         state.record_event(_vault(db), actor="agent", kind="email",
                            summary=f"[{priority}] Email de {sender}: {subject}"[:200],
                            source="outlook", ref=msg_id or path)
+        # Auto-rascunho de resposta SÓ para prioridade alta (best-effort; não falha o email).
+        if priority == "alta":
+            try:
+                generate_reply_draft(_vault(db), path, subject, sender, ref=msg_id,
+                                     priority=priority, db=db)
+            except sdk_llm.LLMRateLimited:
+                log.warning("[draft] limite do LLM — rascunho adiado (gere sob demanda depois)")
+            except Exception as e:
+                log.warning(f"[draft] falha ao gerar rascunho: {e}")
     return {"path": path, "priority": priority, "answer": res.get("answer", ""),
             "sources": res.get("sources", [])}
 

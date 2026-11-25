@@ -115,6 +115,7 @@ HTML = """<!DOCTYPE html>
   .todo-item{display:flex;align-items:flex-start;gap:8px;font-size:13px;color:var(--text)}
   .todo-item input{margin-top:3px}
   .prio-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;margin-top:5px}
+  .c-draft{width:100%;box-sizing:border-box;resize:vertical;font-family:inherit;font-size:12px;line-height:1.5;color:var(--text);background:var(--surface);border:1px solid var(--border);border-radius:7px;padding:7px 8px}
 
   /* ── Modais ── */
   .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:50}
@@ -429,10 +430,44 @@ HTML = """<!DOCTYPE html>
     }catch(e){el.disabled=false;}
   }
 
+  // ── Email (tile de rascunhos de resposta) ──
+  async function loadDrafts(){
+    try{
+      var r=await fetch('/api/drafts?vault='+encodeURIComponent(getRoot()));var d=await r.json();
+      var body=document.getElementById('email-body');var cnt=document.getElementById('email-count');
+      var drafts=d.drafts||[];cnt.textContent=drafts.length;
+      if(!drafts.length){body.innerHTML='<div class="tile-empty"><div class="big">📧</div>Rascunhos de resposta para emails prioritários aparecem aqui, prontos para revisar e copiar.</div>';return;}
+      body.innerHTML='';
+      var pc={alta:'var(--red)',media:'var(--amber)',baixa:'var(--muted)'};
+      drafts.forEach(function(t){
+        var card=document.createElement('div');card.className='card';
+        var dot='<span class="prio-dot" title="'+(t.priority||'media')+'" style="background:'+(pc[t.priority]||pc.media)+'"></span>';
+        card.innerHTML=
+          '<div class="c-top">'+dot+'<span>Para: '+escapeHtml(t.reply_to||'?')+'</span></div>'+
+          '<div class="c-title">'+escapeHtml(t.subject||'(sem assunto)')+'</div>'+
+          '<textarea class="c-draft" id="dft'+t.id+'" rows="6">'+escapeHtml(t.body||'')+'</textarea>'+
+          '<div class="c-actions">'+
+            '<button class="c-btn ok" onclick="copyDraft('+t.id+',this)">📋 Copiar</button>'+
+            '<button class="c-btn" onclick="dismissDraft('+t.id+')">Descartar</button>'+
+          '</div>';
+        body.appendChild(card);
+      });
+    }catch(e){}
+  }
+  function copyDraft(id,btn){
+    var ta=document.getElementById('dft'+id);if(!ta)return;
+    ta.select();
+    try{navigator.clipboard.writeText(ta.value);}catch(e){document.execCommand('copy');}
+    var o=btn.textContent;btn.textContent='✅ Copiado';setTimeout(function(){btn.textContent=o;},1500);
+  }
+  async function dismissDraft(id){
+    try{await fetch('/api/drafts/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:'dismissed'})});loadDrafts();}catch(e){}
+  }
+
   document.addEventListener('keydown',function(e){if(e.key==='Escape'){closeSettings();}});
   loadVault();
-  loadTodos();
-  setInterval(loadTodos, 15000);  // refresh "live" a cada 15s (novos to-dos aparecem sozinhos)
+  loadTodos(); loadDrafts();
+  setInterval(function(){loadTodos();loadDrafts();}, 15000);  // refresh "live" a cada 15s
 </script>
 </body>
 </html>
@@ -916,6 +951,24 @@ def api_todo_update(todo_id):
     data = request.get_json(silent=True) or {}
     status = data.get("status", "done")
     state.set_todo_status(todo_id, "done" if status == "done" else "open")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/drafts", methods=["GET"])
+def api_drafts():
+    from core import state
+    from agent import _vault as _resolve_vault
+    v = _resolve_vault(request.args.get("vault") or None)
+    return jsonify({"drafts": state.list_drafts(v, status="pending"),
+                    "pending": state.count_drafts(v, "pending")})
+
+
+@app.route("/api/drafts/<int:draft_id>", methods=["POST"])
+def api_draft_update(draft_id):
+    from core import state
+    data = request.get_json(silent=True) or {}
+    status = data.get("status", "dismissed")
+    state.set_draft_status(draft_id, status if status in ("sent", "dismissed", "pending") else "dismissed")
     return jsonify({"ok": True})
 
 
