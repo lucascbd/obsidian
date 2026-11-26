@@ -11,7 +11,7 @@ setlocal
 
 REM Comando inline do PowerShell. Le o ultimo argumento da linha de comando (a URL
 REM obsmail:<EntryID> que o Windows passa), extrai o EntryID e abre o email via COM.
-set "CMD=powershell -NoProfile -WindowStyle Hidden -Command \"try{$a=[Environment]::GetCommandLineArgs();$u=$a[$a.Length-1];$e=[uri]::UnescapeDataString(($u -replace '^obsmail:',''));$o=New-Object -ComObject Outlook.Application;$o.GetNamespace('MAPI').GetItemFromID($e).Display($true)}catch{(New-Object -ComObject WScript.Shell).Popup('Nao foi possivel abrir o email (pode ter sido movido/arquivado). '+$_.Exception.Message,8,'Mordomo do Conhecimento',48)}\" \"%%1\""
+set "CMD=powershell -NoProfile -WindowStyle Hidden -Command \"try{$a=[Environment]::GetCommandLineArgs();$u=$a[$a.Length-1];$e=[uri]::UnescapeDataString(($u -replace '^obsmail:',''));$o=New-Object -ComObject Outlook.Application;$m=$o.GetNamespace('MAPI').GetItemFromID($e);$m.Display($false);$i=$m.GetInspector;$i.Activate()}catch{(New-Object -ComObject WScript.Shell).Popup('Nao foi possivel abrir o email. Feche qualquer janela/caixa de dialogo aberta no Outlook e tente de novo. '+$_.Exception.Message,8,'Mordomo do Conhecimento',48)}\" \"%%1\""
 
 reg add "HKCU\Software\Classes\obsmail" /ve /d "URL:Obsidian Mail" /f >nul
 reg add "HKCU\Software\Classes\obsmail" /v "URL Protocol" /d "" /f >nul
