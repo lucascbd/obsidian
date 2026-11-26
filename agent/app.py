@@ -253,8 +253,8 @@ HTML = """<!DOCTYPE html>
     </div>
 
     <div class="sec">
-      <div class="sec-title">Manutenção do Obsidian</div>
-      <div class="hint">Nos horários abaixo (e no botão), roda a manutenção do vault <b>só nas notas novas/alteradas desde a última vez</b>: <b>organiza</b> nas categorias do instructions.md (o Claude só entra em empates), atualiza <b>Notas Relacionadas</b>, <b>refaz os índices</b> (00-meta/indices) e <b>apaga pastas vazias</b> (as categorias fixas ficam). Horários em hora do servidor.</div>
+      <div class="sec-title">Manutenção do vault</div>
+      <div class="hint">Adequa as notas ao <b>00-meta/config/instructions.md</b> (move cada nota para a pasta certa e reescreve os links), atualiza as <b>Notas Relacionadas</b>, <b>refaz os índices</b> (00-meta/indices) e <b>apaga pastas vazias</b> (as categorias fixas ficam). Nos horários agendados roda <b>só nas notas novas</b>. Horários em hora do servidor.</div>
       <div class="field">
         <label>Horários agendados</label>
         <div class="times" id="times"></div>
@@ -263,21 +263,14 @@ HTML = """<!DOCTYPE html>
           <button class="btn-sub" onclick="addTime()">+ Adicionar</button>
         </div>
       </div>
-      <button class="btn-sub" onclick="maintenanceNow(false)">🧹 Rodar manutenção agora (notas novas)</button>
-      <button class="btn-sub" onclick="if(confirm('Processar TODAS as notas? Pode reescrever a seção Notas Relacionadas de muitas notas e usar o Claude nos desempates.'))maintenanceNow(true)">🧹 Manutenção completa (todas as notas)</button>
+      <button class="btn-sub" onclick="maintenanceNow(false)">🧹 Rodar agora — notas novas</button>
+      <button class="btn-sub" onclick="if(confirm('Rodar a manutenção no vault inteiro? Todas as notas são conferidas contra o instructions.md (o Claude só entra em empates de categoria).'))maintenanceNow(true)">🧹 Rodar agora — vault inteiro</button>
     </div>
 
     <div class="sec">
       <div class="sec-title">ChromaDB — Avançado</div>
       <div class="hint">O índice semântico é mantido em dia automaticamente pelo watcher. Reconstrua do zero só em manutenção (ex.: troca de modelo de embeddings) ou recuperação.</div>
       <button class="btn-sub" onclick="reindexFull()">🔄 Reindexar ChromaDB (completo)</button>
-    </div>
-
-    <div class="sec">
-      <div class="sec-title">Organização (00-meta/config/instructions.md)</div>
-      <div class="hint">Reorganiza as notas nas pastas conforme a taxonomia do seu instructions.md. O ChromaDB roteia pela categoria mais próxima e o LLM só desempata. <b>Simule primeiro</b> para revisar os movimentos antes de aplicar (aplicar move as notas e reescreve os wiki links).</div>
-      <button class="btn-sub" onclick="reorgSim()">🗂 Organizar vault — simular</button>
-      <button class="btn-sub" onclick="reorgApply()">✅ Organizar vault — aplicar</button>
     </div>
 
     <div class="modal-btns">
@@ -417,7 +410,7 @@ HTML = """<!DOCTYPE html>
     closeSettings();appendMsg('agent','⚙️ Configurações salvas. Modelo: '+body.model+(body.reindex_times.length?(' · reindex: '+body.reindex_times.join(', ')):''));
   }
   async function maintenanceNow(full){
-    closeSettings();appendMsg('user',full?'🧹 Manutenção completa (todas as notas)':'🧹 Manutenção do Obsidian (notas novas)');
+    closeSettings();appendMsg('user',full?'🧹 Manutenção do vault — vault inteiro':'🧹 Manutenção do vault — notas novas');
     try{var r=await fetch('/api/maintenance',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vault:getRoot(),full:!!full})});var d=await r.json();
       if(d.running){pollMaint();}else{appendMsg('agent',d.answer,d.sources);}}
     catch(e){appendMsg('agent','❌ Erro na manutenção.');}

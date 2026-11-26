@@ -298,38 +298,54 @@ def _maintain_vault_inner(v: str, full: bool, st: dict, t0: float) -> str:
     import time
     import organizer
     since = 0.0 if full else _last_maintenance(v)
+    when = time.strftime("%d/%m %H:%M", time.localtime(since)) if since else ""
+
+    # 0. Garante o índice: indexa aqui o que o watcher ainda não indexou (só o que
+    #    mudou — notas iguais são puladas pelo hash). Sem isso, notas recém-chegadas
+    #    não podem ser organizadas nem relacionadas.
+    st["phase"] = "conferindo o índice das notas"
+    try:
+        indexer.reconcile(v)
+    except Exception as e:
+        log.warning(f"[maintenance] reconcile em {v}: {e}")
+
     notes = _disk_notes(v)
     new_ids = {n["id"] for n in notes if n["mtime"] > since}
-    when = time.strftime("%d/%m %H:%M", time.localtime(since)) if since else "sempre (1ª vez)"
-    lines = [f"**{v}** — {len(new_ids)} nota(s) nova(s)/alterada(s) desde {when}"]
+    if full:
+        head = f"Vault inteiro: **{len(notes)}** nota(s)"
+    elif since:
+        head = f"Notas novas desde {when}: **{len(new_ids)}**"
+    else:
+        head = f"Primeira manutenção: **{len(new_ids)}** nota(s)"
+    lines = [f"✅ **Manutenção concluída** — vault `{v}`", head]
 
-    pending = set()
+    pending, moved = set(), 0
     if new_ids:
-        st["phase"] = f"organizando {len(new_ids)} nota(s) nova(s)"
+        st["phase"] = f"adequando {len(new_ids)} nota(s) ao instructions.md"
         org = organizer.organize_notes(v, new_ids, st)
-        pending = org["pending"]
-        extra = f" · {org['llm']} desempate(s) pelo LLM" if org["llm"] else ""
-        lines.append(f"🗂 Organização: {org['analyzed']} analisada(s), {org['moved']} movida(s){extra}")
-        if org["skipped_rate"]:
-            lines.append(f"⚠️ Limite do Claude: {org['skipped_rate']} nota(s) ficam para a próxima")
+        pending, moved = org["pending"], org["moved"]
+        in_place = max(org["analyzed"] - moved, 0)
+        lines.append(f"- 🗂 {moved} movida(s) para a pasta certa · {in_place} já estavam no lugar")
         # Mover preserva a data de modificação: recalcula os ids novos após os movimentos.
         notes = _disk_notes(v)
         new_ids = {n["id"] for n in notes if n["mtime"] > since}
 
     st["phase"] = "atualizando Notas Relacionadas"
-    lines.append(vault_review(v, only_ids=None if full else new_ids)["answer"])
+    rv = vault_review(v, only_ids=None if full else new_ids)
+    if rv.get("edited"):
+        lines.append(f"- 🔗 Notas Relacionadas atualizadas em {len(rv['edited'])} nota(s)")
 
-    st["phase"] = "refazendo índices e limpando pastas vazias"
+    st["phase"] = "refazendo índices e apagando pastas vazias"
     fin = organizer.finalize(v)
-    lines.append(f"🗺 Índices: {fin['notes']} nota(s) em {fin['subs']} sub-tema(s) (00-meta/indices)")
+    lines.append(f"- 🗺 Índices refeitos: {fin['notes']} nota(s) em {fin['subs']} sub-tema(s)")
     if fin["removed_dirs"]:
-        shown = ", ".join(f"`{d}`" for d in fin["removed_dirs"][:10])
-        more = f" (+{len(fin['removed_dirs']) - 10})" if len(fin["removed_dirs"]) > 10 else ""
-        lines.append(f"🧹 Pastas vazias removidas: {shown}{more}")
+        shown = ", ".join(f"`{d}`" for d in fin["removed_dirs"][:8])
+        more = f" (+{len(fin['removed_dirs']) - 8})" if len(fin["removed_dirs"]) > 8 else ""
+        lines.append(f"- 🧹 Pastas vazias apagadas: {shown}{more}")
 
     # Próximo ponto de partida = FIM desta manutenção (o que ela mesma escreveu não
     # conta como novo). Recuam o ponto, para entrarem na próxima: notas alteradas por
-    # outros durante a execução (ex.: email que chegou), notas ainda não indexadas e
+    # outros durante a execução (ex.: email que chegou), notas ainda sem índice e
     # notas puladas pelo limite do Claude.
     written = getattr(vault_fs._tl, "log", None) or set()
     final = _disk_notes(v)
@@ -341,10 +357,12 @@ def _maintain_vault_inner(v: str, full: bool, st: dict, t0: float) -> str:
     if late or held:
         mark = min(late + held) - 1
     if pending:
-        lines.append(f"⏳ {len(pending)} nota(s) ainda não indexada(s)/pulada(s) — entram na próxima")
+        lines.append(f"- ⏳ {len(pending)} nota(s) ficam para a próxima "
+                     f"(ainda sem índice ou limite do Claude atingido)")
     state.kv_set(v, MAINT_KEY, mark)
     state.record_event(v, actor="system", kind="maintenance",
-                       summary=f"Manutenção do Obsidian ({len(new_ids)} nota(s) nova(s))", source="obsidian")
+                       summary=f"Manutenção do vault ({'inteiro' if full else f'{len(new_ids)} nota(s) nova(s)'}, "
+                               f"{moved} movida(s))", source="obsidian")
     return "\n".join(lines)
 
 
@@ -360,8 +378,8 @@ def obsidian_maintenance(vault: Optional[str] = None, full: bool = False, st: di
                 parts.append(_maintain_vault(v, full=full, st=st))
             except Exception as e:
                 log.error(f"[maintenance] erro em {v}: {e}")
-                parts.append(f"**{v}** — ❌ erro: {e}")
-        return {"answer": "✅ Manutenção do Obsidian concluída\n\n" + "\n\n".join(parts), "sources": []}
+                parts.append(f"❌ **Manutenção com erro** — vault `{v}`: {e}")
+        return {"answer": "\n\n".join(parts), "sources": []}
     finally:
         _maint_lock.release()
 
@@ -1943,7 +1961,7 @@ def vault_review(vault: Optional[str] = None, only_ids: Optional[set] = None) ->
     targets = None if only_ids is None else (set(only_ids) | dead)
     if targets is not None and not targets:
         return {"answer": "🔗 Notas Relacionadas: nenhuma nota nova desde a última manutenção.",
-                "sources": []}
+                "sources": [], "edited": [], "not_indexed": 0}
 
     try:
         col = get_chroma().get_collection(_col_name(vault_name))
@@ -2023,4 +2041,5 @@ def vault_review(vault: Optional[str] = None, only_ids: Optional[set] = None) ->
     if not_indexed > 0:
         lines.append(f"- {not_indexed} nota(s) do disco ainda não estão no índice "
                      f"(o watcher indexa em instantes)")
-    return {"answer": "\n".join(lines), "sources": edited[:20]}
+    return {"answer": "\n".join(lines), "sources": edited[:20], "edited": edited,
+            "not_indexed": max(not_indexed, 0)}

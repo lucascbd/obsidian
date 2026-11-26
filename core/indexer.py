@@ -114,7 +114,7 @@ def index_note(vault: str, note_id: str, content: str, col=None, force: bool = F
     fm = parse_frontmatter(content)
     base_meta = {"note_id": note_id, "vault": vault, **fm}
     ids = [_chunk_id(vault, note_id, i) for i in range(len(chunks))]
-    col.add(
+    col.upsert(   # upsert: agent (manutenção) e watcher podem indexar a mesma nota
         documents=chunks,
         embeddings=embeddings,
         ids=ids,
