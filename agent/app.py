@@ -44,8 +44,11 @@ HTML = """<!DOCTYPE html>
   }
   *{box-sizing:border-box;margin:0;padding:0}
   /* Scrollbar no tema dark — fina, arredondada, discreta */
-  *{scrollbar-width:thin;scrollbar-color:var(--border) transparent}
+  /* scrollbar-width/color só no Firefox: no Chrome/Edge recentes elas desativam o
+     ::-webkit-scrollbar e a barra fina nativa do Windows mostra as setinhas. */
+  @supports (-moz-appearance:none){*{scrollbar-width:thin;scrollbar-color:var(--border) transparent}}
   ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-button{display:none;width:0;height:0}
   ::-webkit-scrollbar-track{background:transparent}
   ::-webkit-scrollbar-thumb{background:var(--border);border:2px solid transparent;background-clip:padding-box;border-radius:8px}
   ::-webkit-scrollbar-thumb:hover{background:var(--muted);border:2px solid transparent;background-clip:padding-box}
@@ -159,6 +162,16 @@ HTML = """<!DOCTYPE html>
   .time-pill button:hover{color:var(--red)}
   .add-time{display:flex;gap:6px}
   .modal-btns{display:flex;justify-content:flex-end;gap:8px;margin-top:4px}
+  .modal.tabbed{width:540px;height:min(620px,88vh);overflow:hidden;gap:12px}
+  .tabs{display:flex;gap:4px;border-bottom:1px solid var(--border);flex-shrink:0}
+  .tab{background:none;border:none;border-bottom:2px solid transparent;color:var(--muted);font:inherit;font-size:13px;padding:8px 12px;cursor:pointer;margin-bottom:-1px}
+  .tab:hover{color:var(--text)}
+  .tab.on{color:var(--text);border-bottom-color:var(--accent)}
+  .tab-panes{flex:1;min-height:0;overflow-y:auto;padding-right:4px}
+  .tab-pane{display:none;flex-direction:column;gap:14px}
+  .tab-pane.on{display:flex}
+  .tab-pane > .sec:first-child{border-top:none;padding-top:0}
+  .modal.tabbed .modal-btns{flex-shrink:0;border-top:1px solid var(--border);padding-top:12px;margin-top:0}
   .btn-cancel{background:var(--surface2);border:1px solid var(--border);color:var(--label);padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px}
   .btn-ok{background:var(--accent);border:none;color:#fff;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px}
   .btn-sub{background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:8px;cursor:pointer;font-size:12px}
@@ -221,56 +234,68 @@ HTML = """<!DOCTYPE html>
 
 <!-- Modal: Configurações -->
 <div class="modal-overlay" id="settings-modal">
-  <div class="modal">
+  <div class="modal tabbed">
     <h3>⚙️ Configurações</h3>
-
-    <div class="field">
-      <label>Modelo (LLM)</label>
-      <select id="set-model">
-        <option value="sonnet">Claude Sonnet — equilíbrio (padrão)</option>
-        <option value="opus">Claude Opus — máxima capacidade</option>
-        <option value="haiku">Claude Haiku — rápido e econômico</option>
-      </select>
-      <div class="hint">Usa sua assinatura Claude Pro. Modelos mais fortes consomem mais da sua cota.</div>
+    <div class="tabs">
+      <button class="tab on" data-tab="geral" onclick="setTab('geral')">Geral</button>
+      <button class="tab" data-tab="email" onclick="setTab('email')">Email</button>
+      <button class="tab" data-tab="manutencao" onclick="setTab('manutencao')">Manutenção</button>
+      <button class="tab" data-tab="avancado" onclick="setTab('avancado')">Avançado</button>
     </div>
-
-    <div class="field">
-      <label>Coletor — intervalo de verificação (segundos)</label>
-      <input type="text" id="set-poll" placeholder="300">
-      <div class="hint">De quanto em quanto tempo o coletor de email busca mensagens novas. Padrão 300 (5 min). Mínimo 30.</div>
-    </div>
-
-    <div class="field">
-      <label>Filtro do coletor — ignorar (um por linha)</label>
-      <textarea id="set-skip" rows="4" placeholder="trecho de remetente ou assunto, ex:&#10;newsletter&#10;iqviafan@iqvia.com&#10;promo"></textarea>
-      <div class="hint">Emails cujo remetente ou assunto contenham qualquer um destes trechos são ignorados (sem gastar LLM). Vazio = processa tudo. RH, learning, convites e reuniões passam a menos que você os adicione aqui.</div>
-    </div>
-
-    <div class="field">
-      <label>Nunca gerar rascunho (um por linha)</label>
-      <textarea id="set-neverdraft" rows="4" placeholder="remetente, destinatário ou domínio, ex:&#10;comunicação interna&#10;internal communications&#10;@newsletter.haleon.com"></textarea>
-      <div class="hint">Estes <b>continuam virando nota</b> (você pode me pedir resumo), mas <b>nunca</b> geram rascunho de resposta automático. Use para comunicados globais, listas de distribuição, etc. No-reply, auto-replies e emails de massa já são poupados automaticamente.</div>
-    </div>
-
-    <div class="sec">
-      <div class="sec-title">Manutenção do vault</div>
-      <div class="hint">Adequa as notas ao <b>00-meta/config/instructions.md</b> (move cada nota para a pasta certa e reescreve os links), atualiza as <b>Notas Relacionadas</b>, <b>refaz os índices</b> (00-meta/indices) e <b>apaga pastas vazias</b> (as categorias fixas ficam). Nos horários agendados roda <b>só nas notas novas</b>. Horários em hora do servidor.</div>
-      <div class="field">
-        <label>Horários agendados</label>
-        <div class="times" id="times"></div>
-        <div class="add-time">
-          <input type="time" id="new-time" value="03:00">
-          <button class="btn-sub" onclick="addTime()">+ Adicionar</button>
+    <div class="tab-panes">
+      <div class="tab-pane on" data-pane="geral">
+        <div class="field">
+          <label>Modelo (LLM)</label>
+          <select id="set-model">
+            <option value="sonnet">Claude Sonnet — equilíbrio (padrão)</option>
+            <option value="opus">Claude Opus — máxima capacidade</option>
+            <option value="haiku">Claude Haiku — rápido e econômico</option>
+          </select>
+          <div class="hint">Usa sua assinatura Claude Pro. Modelos mais fortes consomem mais da sua cota.</div>
         </div>
       </div>
-      <button class="btn-sub" onclick="maintenanceNow(false)">🧹 Rodar agora — notas novas</button>
-      <button class="btn-sub" onclick="if(confirm('Rodar a manutenção no vault inteiro? Todas as notas são conferidas contra o instructions.md (o Claude só entra em empates de categoria).'))maintenanceNow(true)">🧹 Rodar agora — vault inteiro</button>
-    </div>
+      <div class="tab-pane" data-pane="email">
+        <div class="field">
+          <label>Coletor — intervalo de verificação (segundos)</label>
+          <input type="text" id="set-poll" placeholder="300">
+          <div class="hint">De quanto em quanto tempo o coletor de email busca mensagens novas. Padrão 300 (5 min). Mínimo 30.</div>
+        </div>
 
-    <div class="sec">
-      <div class="sec-title">ChromaDB — Avançado</div>
-      <div class="hint">O índice semântico é mantido em dia automaticamente pelo watcher. Reconstrua do zero só em manutenção (ex.: troca de modelo de embeddings) ou recuperação.</div>
-      <button class="btn-sub" onclick="reindexFull()">🔄 Reindexar ChromaDB (completo)</button>
+        <div class="field">
+          <label>Filtro do coletor — ignorar (um por linha)</label>
+          <textarea id="set-skip" rows="4" placeholder="trecho de remetente ou assunto, ex:&#10;newsletter&#10;iqviafan@iqvia.com&#10;promo"></textarea>
+          <div class="hint">Emails cujo remetente ou assunto contenham qualquer um destes trechos são ignorados (sem gastar LLM). Vazio = processa tudo. RH, learning, convites e reuniões passam a menos que você os adicione aqui.</div>
+        </div>
+
+        <div class="field">
+          <label>Nunca gerar rascunho (um por linha)</label>
+          <textarea id="set-neverdraft" rows="4" placeholder="remetente, destinatário ou domínio, ex:&#10;comunicação interna&#10;internal communications&#10;@newsletter.haleon.com"></textarea>
+          <div class="hint">Estes <b>continuam virando nota</b> (você pode me pedir resumo), mas <b>nunca</b> geram rascunho de resposta automático. Use para comunicados globais, listas de distribuição, etc. No-reply, auto-replies e emails de massa já são poupados automaticamente.</div>
+        </div>
+      </div>
+      <div class="tab-pane" data-pane="manutencao">
+        <div class="sec">
+          <div class="sec-title">Manutenção do vault</div>
+          <div class="hint">Adequa as notas ao <b>00-meta/config/instructions.md</b> (move cada nota para a pasta certa e reescreve os links), atualiza as <b>Notas Relacionadas</b>, <b>refaz os índices</b> (00-meta/indices) e <b>apaga pastas vazias</b> (as categorias fixas ficam). Nos horários agendados roda <b>só nas notas novas</b>. Horários em hora do servidor.</div>
+          <div class="field">
+            <label>Horários agendados</label>
+            <div class="times" id="times"></div>
+            <div class="add-time">
+              <input type="time" id="new-time" value="03:00">
+              <button class="btn-sub" onclick="addTime()">+ Adicionar</button>
+            </div>
+          </div>
+          <button class="btn-sub" onclick="maintenanceNow(false)">🧹 Rodar agora — notas novas</button>
+          <button class="btn-sub" onclick="if(confirm('Rodar a manutenção no vault inteiro? Todas as notas são conferidas contra o instructions.md (o Claude só entra em empates de categoria).'))maintenanceNow(true)">🧹 Rodar agora — vault inteiro</button>
+        </div>
+      </div>
+      <div class="tab-pane" data-pane="avancado">
+        <div class="sec">
+          <div class="sec-title">ChromaDB — Avançado</div>
+          <div class="hint">O índice semântico é mantido em dia automaticamente pelo watcher. Reconstrua do zero só em manutenção (ex.: troca de modelo de embeddings) ou recuperação.</div>
+          <button class="btn-sub" onclick="reindexFull()">🔄 Reindexar ChromaDB (completo)</button>
+        </div>
+      </div>
     </div>
 
     <div class="modal-btns">
@@ -399,7 +424,12 @@ HTML = """<!DOCTYPE html>
   async function openSettings(){
     try{var r=await fetch('/api/settings');var d=await r.json();document.getElementById('set-model').value=d.model||'sonnet';document.getElementById('set-poll').value=d.poll_seconds||300;document.getElementById('set-skip').value=(d.skip_patterns||[]).join('\\n');document.getElementById('set-neverdraft').value=(d.never_draft||[]).join('\\n');_times=(d.reindex_times||[]).slice();}
     catch(e){_times=[];}
-    renderTimes();document.getElementById('settings-modal').classList.add('open');
+    renderTimes();var _t='geral';try{_t=localStorage.getItem('settingsTab')||'geral';}catch(e){}setTab(_t);document.getElementById('settings-modal').classList.add('open');
+  }
+  function setTab(name){
+    document.querySelectorAll('#settings-modal .tab').forEach(function(t){t.classList.toggle('on',t.dataset.tab===name);});
+    document.querySelectorAll('#settings-modal .tab-pane').forEach(function(p){p.classList.toggle('on',p.dataset.pane===name);});
+    try{localStorage.setItem('settingsTab',name);}catch(e){}
   }
   function closeSettings(){document.getElementById('settings-modal').classList.remove('open');}
   async function saveSettings(){
