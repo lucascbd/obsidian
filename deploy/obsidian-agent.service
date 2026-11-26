@@ -11,6 +11,8 @@ EnvironmentFile=/etc/obsidian-agent.env
 Environment=PYTHONPATH=__AGENT_HOME__
 Environment=HOME=__RUN_HOME__
 Environment=PYTHONUNBUFFERED=1
+# Menos arenas do glibc: evita que o RSS cresça por fragmentação em processos longos.
+Environment=MALLOC_ARENA_MAX=2
 UMask=0002
 ExecStart=__AGENT_HOME__/.venv/bin/python app.py
 Restart=always

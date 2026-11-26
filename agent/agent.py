@@ -12,7 +12,7 @@ import requests
 from pathlib import Path
 from typing import Optional
 
-from core import vault_fs, state, indexer
+from core import vault_fs, state, indexer, embedder
 from core.config import VAULT_ROOT, DATA_DIR, EMBEDDING_MODEL, col_name as _col_name, is_meta
 from core.text import (
     parse_frontmatter as _parse_frontmatter_core,
@@ -42,11 +42,7 @@ MAX_ROUNDS = 500
 _stop_event   = __import__("threading").Event()
 
 
-# Chroma/embeddings compartilham o singleton do indexer (um cliente por processo).
-def get_embed_model():
-    return indexer.get_model()
-
-
+# Embeddings: core.embedder (o agent é o único processo que carrega o modelo).
 def get_chroma():
     return indexer.get_chroma()
 
@@ -404,7 +400,6 @@ def tool_search_vault(query: str, collections: Optional[list] = None, db: str = 
     """Busca semântica no vault (uma coleção por vault). Suporta filtro por tags e data."""
     vault  = _vault(db)
     col_nm = _col_name(vault)
-    model  = get_embed_model()
     chroma = get_chroma()
 
     try:
@@ -412,7 +407,7 @@ def tool_search_vault(query: str, collections: Optional[list] = None, db: str = 
     except Exception:
         return "Vault ainda não indexado pelo watcher."
 
-    embedding = list(model.embed([query]))[0].tolist()
+    embedding = embedder.embed_one(query)
 
     # Filtros de metadata opcionais
     where: dict = {}
@@ -625,7 +620,7 @@ def _find_related_for_new_note(content: str, exclude_path: str, db: str = None, 
     vault = _vault(db)
     try:
         col = get_chroma().get_collection(_col_name(vault))
-        embedding = list(get_embed_model().embed([content[:1000]]))[0].tolist()
+        embedding = embedder.embed_one(content[:1000])
         r = col.query(query_embeddings=[embedding], n_results=10, include=["metadatas", "distances"])
         related, seen = [], {exclude_path.lower()}
         for meta, dist in zip(r["metadatas"][0], r["distances"][0]):

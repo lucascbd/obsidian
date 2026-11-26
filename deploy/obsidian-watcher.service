@@ -1,6 +1,6 @@
 [Unit]
 Description=Mordomo do Conhecimento — watcher (indexa o vault no ChromaDB)
-After=network-online.target docker.service
+After=network-online.target docker.service obsidian-agent.service
 Wants=network-online.target
 
 [Service]
@@ -12,6 +12,10 @@ Environment=PYTHONPATH=__AGENT_HOME__
 Environment=AGENT_HOME=__AGENT_HOME__
 Environment=HOME=__RUN_HOME__
 Environment=PYTHONUNBUFFERED=1
+# Menos arenas do glibc: evita que o RSS cresça por fragmentação em processos longos.
+Environment=MALLOC_ARENA_MAX=2
+# Embeddings vêm do agent (/internal/embed): o watcher não carrega o modelo.
+Environment=EMBED_REMOTE_URL=agent
 UMask=0002
 ExecStart=__AGENT_HOME__/.venv/bin/python watcher.py
 Restart=always

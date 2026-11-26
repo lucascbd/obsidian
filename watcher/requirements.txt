@@ -1,4 +1,6 @@
 watchdog==4.0.1
 chromadb==0.5.20
-fastembed>=0.5.0
+# posthog 6 mudou a assinatura de capture() e o chromadb 0.5.20 loga erro a cada cliente
+posthog<6
+fastembed>=0.7.0
 requests==2.31.0

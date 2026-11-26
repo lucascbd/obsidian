@@ -125,14 +125,21 @@ def initial_scan():
     """Reconcilia cada vault no disco com o índice (pula o que não mudou)."""
     for vault in vault_fs.get_vaults():
         try:
+            indexer.ensure_model(vault)   # troca de modelo → recria a coleção
             indexer.reconcile(vault)
         except Exception as e:
             log.error(f"[{vault}] erro no scan inicial: {e}")
 
 
 def main():
+    from core import embedder
     VAULT_ROOT.mkdir(parents=True, exist_ok=True)
     state.init_db()
+    if embedder.remote_url():
+        log.info(f"Embeddings via agent: {embedder.remote_url()} (modelo NÃO é carregado aqui)")
+    else:
+        log.warning("EMBED_REMOTE_URL não definido: o watcher vai carregar o modelo de "
+                    "embeddings localmente (uma 2ª cópia na memória). Defina EMBED_REMOTE_URL=agent.")
     wait_for_chroma()
 
     log.info(f"Scan inicial em {VAULT_ROOT}")

@@ -73,13 +73,14 @@ def _priority_rules(text: str) -> str:
 # ── Embeddings / roteamento (ChromaDB) ──────────────────────────────────────────
 
 def _vectors(cats: list):
-    key = hashlib.md5("|".join(cats).encode()).hexdigest()
+    from core import embedder
+    from core.config import EMBEDDING_MODEL
+    key = hashlib.md5(("|".join(cats) + "#" + EMBEDDING_MODEL).encode()).hexdigest()
     if key in _cat_cache:
         return _cat_cache[key]
     import numpy as np
-    from core.indexer import get_model
     texts = [f"categoria: {c.replace('-', ' ')}" for c in cats]
-    mat = np.array([list(v) for v in get_model().embed(texts)], dtype=float)
+    mat = np.array(embedder.embed(texts), dtype=float)
     mat = mat / (np.linalg.norm(mat, axis=1, keepdims=True) + 1e-9)
     _cat_cache[key] = (cats, mat)
     return cats, mat
@@ -87,9 +88,8 @@ def _vectors(cats: list):
 
 def _embed(text: str):
     import numpy as np
-    from core.indexer import get_model
-    v = list(get_model().embed([text[:2000]]))[0]
-    v = np.array(list(v), dtype=float)
+    from core import embedder
+    v = np.array(embedder.embed_one(text[:2000]), dtype=float)
     return v / (np.linalg.norm(v) + 1e-9)
 
 
@@ -231,23 +231,31 @@ def _compute_moves(vault: str, cats: list, instr: str, use_llm: bool, limit: int
     import numpy as np
     from core.indexer import get_collection
     col = get_collection(vault)
-    data = col.get(include=["embeddings", "metadatas"])
     names, mat = _vectors(cats)
 
-    embs = data.get("embeddings")
-    metas = data.get("metadatas")
-    if embs is None:
-        embs = []
-    if metas is None:
-        metas = []
-
+    # Lê a coleção em páginas e guarda só 1 vetor por nota (evita trazer todos os
+    # chunks de uma vez para a memória).
     note_vec, note_meta = {}, {}
-    for emb, meta in zip(embs, metas):
-        nid = meta.get("note_id", "")
-        if not nid or is_meta(nid) or nid in note_vec:
-            continue
-        note_vec[nid] = emb
-        note_meta[nid] = meta
+    page, offset = 500, 0
+    while True:
+        data = col.get(include=["embeddings", "metadatas"], limit=page, offset=offset)
+        embs = data.get("embeddings")
+        metas = data.get("metadatas")
+        if embs is None:
+            embs = []
+        if metas is None:
+            metas = []
+        if len(metas) == 0:
+            break
+        for emb, meta in zip(embs, metas):
+            nid = (meta or {}).get("note_id", "")
+            if not nid or is_meta(nid) or nid in note_vec:
+                continue
+            note_vec[nid] = np.asarray(emb, dtype=np.float32)
+            note_meta[nid] = meta
+        offset += len(metas)
+        if len(metas) < page:
+            break
 
     moves = []
     for nid, emb in note_vec.items():

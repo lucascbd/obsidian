@@ -6,40 +6,72 @@ arquivos não alterados. Usado pelo watcher (eventos de filesystem) e pelo
 agente (reindex manual).
 """
 
+import os
 import logging
-import threading
 
 import chromadb
-from fastembed import TextEmbedding
+from chromadb.config import Settings
 
-from . import state, vault_fs
+from . import state, vault_fs, embedder
 from .config import CHROMA_HOST, CHROMA_PORT, EMBEDDING_MODEL, col_name, is_meta
 from .text import parse_frontmatter, chunk_by_sections, extract_wiki_links
 
 log = logging.getLogger(__name__)
 
-_model = None
 _chroma = None
-_model_lock = threading.Lock()
 
-
-def get_model() -> TextEmbedding:
-    global _model
-    if _model is None:
-        log.info(f"Carregando modelo de embeddings: {EMBEDDING_MODEL}")
-        _model = TextEmbedding(EMBEDDING_MODEL)
-    return _model
+# Coleções criadas antes de gravarmos o modelo nos metadados foram geradas com este.
+LEGACY_MODEL = os.environ.get("EMBED_LEGACY_MODEL", "intfloat/multilingual-e5-large")
 
 
 def get_chroma() -> chromadb.HttpClient:
     global _chroma
     if _chroma is None:
-        _chroma = chromadb.HttpClient(host=CHROMA_HOST, port=CHROMA_PORT)
+        # Telemetria desligada: o chromadb 0.5.20 quebra com o posthog >= 6
+        # ("capture() takes 1 positional argument but 3 were given").
+        _chroma = chromadb.HttpClient(host=CHROMA_HOST, port=CHROMA_PORT,
+                                      settings=Settings(anonymized_telemetry=False))
     return _chroma
 
 
 def get_collection(vault: str):
-    return get_chroma().get_or_create_collection(col_name(vault))
+    """Coleção do vault. Ao criar, grava qual modelo gera os vetores (ver ensure_model)."""
+    ch, name = get_chroma(), col_name(vault)
+    try:
+        return ch.get_collection(name)
+    except Exception:
+        pass
+    try:
+        return ch.create_collection(name, metadata={"embed_model": EMBEDDING_MODEL})
+    except Exception as create_err:
+        try:
+            return ch.get_collection(name)  # outro processo criou no meio-tempo
+        except Exception:
+            raise create_err from None
+
+
+def ensure_model(vault: str) -> bool:
+    """Garante que a coleção foi gerada pelo modelo configurado. Se o EMBEDDING_MODEL
+    mudou (a dimensão dos vetores muda junto), recria a coleção vazia e esquece o
+    estado de indexação do vault — o reconcile seguinte reindexa tudo.
+    Retorna True se recriou. Chamado pelo watcher antes do reconcile."""
+    ch, name = get_chroma(), col_name(vault)
+    col = get_collection(vault)
+    meta = dict(col.metadata or {})
+    stored = meta.get("embed_model") or LEGACY_MODEL
+    if stored == EMBEDDING_MODEL:
+        if not meta.get("embed_model"):
+            try:
+                col.modify(metadata={**meta, "embed_model": EMBEDDING_MODEL})
+            except Exception as e:
+                log.warning(f"[{vault}] não gravou embed_model nos metadados: {e}")
+        return False
+    log.warning(f"[{vault}] modelo de embeddings mudou ({stored} → {EMBEDDING_MODEL}): "
+                f"recriando a coleção e reindexando tudo")
+    ch.delete_collection(name)
+    state.forget_vault_index(vault)
+    ch.create_collection(name, metadata={"embed_model": EMBEDDING_MODEL})
+    return True
 
 
 def _chunk_id(vault: str, note_id: str, i: int) -> str:
@@ -63,6 +95,10 @@ def index_note(vault: str, note_id: str, content: str, col=None, force: bool = F
     if not chunks:
         return 0
 
+    # Embeda ANTES de apagar os chunks antigos: se falhar (ex.: agent fora do ar),
+    # a nota continua com o índice anterior e o próximo rescan tenta de novo.
+    embeddings = embedder.embed(chunks)
+
     # Remove chunks antigos desta nota antes de reinserir (upsert limpo).
     old = state.chunk_ids(vault, note_id)
     if old:
@@ -74,10 +110,6 @@ def index_note(vault: str, note_id: str, content: str, col=None, force: bool = F
         col.delete(where={"note_id": note_id})
     except Exception:
         pass
-
-    model = get_model()
-    with _model_lock:
-        embeddings = [e.tolist() for e in model.embed(chunks)]
 
     fm = parse_frontmatter(content)
     base_meta = {"note_id": note_id, "vault": vault, **fm}
@@ -93,7 +125,6 @@ def index_note(vault: str, note_id: str, content: str, col=None, force: bool = F
     state.set_links(vault, note_id, links)
     state.record_chunks(vault, note_id, ids)
 
-    import os
     try:
         mtime = os.path.getmtime(vault_fs._resolve(vault, note_id))
     except Exception:
@@ -132,6 +163,10 @@ def reconcile(vault: str, col=None, force: bool = False) -> dict:
         try:
             content = vault_fs.read_path(path)
             indexed += 1 if index_note(vault, note_id, content, col=col, force=force) else 0
+        except embedder.EmbedError as e:
+            # Agent fora do ar: não insiste nota por nota; o próximo rescan retoma.
+            log.warning(f"[{vault}] reconcile interrompido (embeddings indisponíveis): {e}")
+            return {"indexed": indexed, "removed": 0, "total": len(seen), "aborted": True}
         except Exception as e:
             log.error(f"[{vault}] erro ao indexar {note_id}: {e}")
 

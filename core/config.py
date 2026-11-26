@@ -15,7 +15,7 @@ STATE_DB   = DATA_DIR / "state.db"
 CHROMA_HOST = os.environ.get("CHROMADB_HOST", "chromadb")
 CHROMA_PORT = int(os.environ.get("CHROMADB_PORT", 8000))
 
-EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "intfloat/multilingual-e5-large")
+EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "Xenova/multilingual-e5-small")
 
 # Pastas/arquivos que não devem ser indexados nem tratados como notas do usuário.
 META_DIR     = "00-meta"

@@ -7,6 +7,10 @@ import queue
 import json
 import logging
 import threading
+
+# O agent é o ÚNICO dono do modelo de embeddings (modo local). EMBED_REMOTE_URL é
+# só para o watcher; se vier no arquivo de env compartilhado, ignora aqui.
+os.environ.pop("EMBED_REMOTE_URL", None)
 from flask import Flask, request, jsonify, render_template_string, Response, stream_with_context
 from flask_cors import CORS
 from agent import ask, weekly_summary, summarize_meeting, vault_review, normalize_tags, purge_vault, ingest_file, ingest_url, ingest_zip, get_vaults, stop_agent, reset_stop, tool_read_note, reindex_vault, rebuild_indices, obsidian_maintenance, generate_output, ingest_email, process_email_payload, enqueue_event, process_event_payload
@@ -899,6 +903,26 @@ def _machine_auth():
     if request.headers.get("X-Api-Key") != AGENT_API_KEY:
         return False, (jsonify({"error": "unauthorized"}), 401)
     return True, None
+
+
+@app.route("/internal/embed", methods=["POST"])
+def internal_embed():
+    """Embeddings para o watcher (que não carrega o modelo). Exige AGENT_API_KEY:
+    o túnel do Cloudflare também chega como localhost, então IP não basta."""
+    ok, err = _machine_auth()
+    if not ok:
+        return err
+    from core import embedder
+    data = request.get_json(silent=True) or {}
+    texts = data.get("texts")
+    if (not isinstance(texts, list) or not texts or len(texts) > embedder.MAX_TEXTS_PER_REQUEST
+            or not all(isinstance(t, str) for t in texts)):
+        return jsonify({"error": "texts: lista de 1..256 strings"}), 400
+    try:
+        return jsonify({"embeddings": embedder.embed_local(texts)})
+    except Exception as e:
+        log.error(f"[embed] erro: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/processed", methods=["GET"])

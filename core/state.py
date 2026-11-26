@@ -403,6 +403,14 @@ def forget_note(vault: str, path: str) -> None:
         c.execute("DELETE FROM links  WHERE vault=? AND src=?",  (vault, path))
 
 
+def forget_vault_index(vault: str) -> None:
+    """Esquece o estado de indexação do vault inteiro (troca de modelo de embeddings):
+    o próximo reconcile reindexa tudo. O grafo de links é mantido (não depende dos vetores)."""
+    with _lock, _conn() as c:
+        c.execute("DELETE FROM notes  WHERE vault=?", (vault,))
+        c.execute("DELETE FROM chunks WHERE vault=?", (vault,))
+
+
 def known_paths(vault: str) -> set:
     """Paths já registrados para um vault (para reconciliar com o disco)."""
     with _conn() as c:
