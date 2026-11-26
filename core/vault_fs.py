@@ -30,7 +30,36 @@ def _resolve(vault: str, note_id: str) -> Path:
     target = (base / note_id).resolve()
     if base not in target.parents and target != base:
         raise ValueError(f"Caminho fora do vault: {note_id}")
+    if not target.exists():
+        # note_ids são guardados em minúsculas, mas o disco diferencia maiúsculas:
+        # acha o arquivo/pasta existente ignorando o caso (evita "não encontrada" e
+        # a criação de uma cópia duplicada em minúsculas ao escrever).
+        ci = _match_case_insensitive(base, target.relative_to(base).parts)
+        if ci is not None:
+            return ci
     return target
+
+
+def _match_case_insensitive(base: Path, parts) -> "Path | None":
+    """Caminha a partir de base casando cada componente sem diferenciar maiúsculas.
+    Retorna o maior prefixo existente + o resto (para escrever numa pasta existente
+    com outro caso), ou None se nada casar além de base."""
+    cur, matched = base, 0
+    for i, part in enumerate(parts):
+        nxt = cur / part
+        if not nxt.exists():
+            low = part.lower()
+            try:
+                hit = next((c for c in cur.iterdir() if c.name.lower() == low), None)
+            except (FileNotFoundError, NotADirectoryError):
+                hit = None
+            if hit is None:
+                break
+            nxt = hit
+        cur, matched = nxt, i + 1
+    if matched == 0:
+        return None
+    return cur.joinpath(*parts[matched:]) if matched < len(parts) else cur
 
 
 def note_id_of(vault: str, path: Path) -> str:

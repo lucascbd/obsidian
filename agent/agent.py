@@ -242,7 +242,7 @@ def reindex_vault(vault: Optional[str] = None) -> dict:
         for note_id in list(state.known_paths(v)):
             state.forget_note(v, note_id)
 
-        col = chroma.get_or_create_collection(col_nm)
+        col = indexer.get_collection(v)   # cria gravando o modelo atual nos metadados
         stats = indexer.reconcile(v, col=col, force=True)
         results.append(f"[{v}] {stats['indexed']} nota(s) reindexadas")
         state.record_event(v, actor="system", kind="reindex",
@@ -282,16 +282,14 @@ def obsidian_maintenance(vault: Optional[str] = None) -> dict:
 
 
 def rebuild_indices(vault: Optional[str] = None) -> dict:
-    """Regenera SÓ os índices MOC do Obsidian (00-meta/indices/) a partir dos metadados
-    que já estão no ChromaDB. NÃO apaga nem re-embeda a coleção (o watcher mantém o Chroma
-    em dia continuamente)."""
+    """Regenera SÓ os índices MOC do Obsidian (00-meta/indices/) a partir do DISCO
+    (fonte da verdade). Não depende do ChromaDB."""
     vaults_to_run = [vault] if vault else get_vaults()
     results = []
     for v in vaults_to_run:
         try:
-            col = get_chroma().get_or_create_collection(_col_name(v))
-            _build_vault_indices(v, col)
-            results.append(f"[{v}] índices Obsidian atualizados em 00-meta/indices/")
+            n_notes, n_subs = _build_vault_indices(v)
+            results.append(f"[{v}] {n_notes} nota(s) em {n_subs} sub-tema(s) — índices em 00-meta/indices/")
             state.record_event(v, actor="system", kind="indices",
                                summary="Atualizou os índices do Obsidian (00-meta/indices)", source="obsidian")
         except Exception as e:
@@ -303,91 +301,99 @@ def rebuild_indices(vault: Optional[str] = None) -> dict:
     }
 
 
-def _build_vault_indices(vault: str, col) -> None:
-    """Gera a hierarquia de índices (MOC) em 00-meta/indices/. Zero LLM.
-    Graph view: _mapa-geral → sub-temas (categorias) → notas.
-    (O antigo índice por pasta raiz foi removido por ser redundante.)"""
+def _disk_notes(vault: str) -> list:
+    """Notas do vault lidas do DISCO (fonte da verdade): id (minúsculo), link (caminho
+    real, sem .md, para wiki links), título e data do frontmatter. Exclui 00-meta."""
+    base = vault_fs.vault_dir(vault)
+    out = []
+    for nid, p in vault_fs.iter_notes(vault):
+        rel = p.relative_to(base).as_posix()
+        try:
+            fm = _parse_frontmatter(vault_fs.read_path(p))
+        except Exception:
+            fm = {}
+        stem = re.sub(r"^\d{4}-\d{2}-\d{2}-?", "", p.stem) or p.stem
+        title = str(fm.get("title") or stem.replace("-", " ").strip().capitalize())
+        out.append({"id": nid, "link": rel[:-3] if rel.endswith(".md") else rel,
+                    "title": title.replace("|", "-").replace("]", ")").replace("[", "("),
+                    "date": str(fm.get("date") or "")})
+    return out
+
+
+INDEX_SUBS_DIR = "00-meta/indices/sub-temas"
+
+
+def _build_vault_indices(vault: str, col=None) -> tuple:
+    """Gera a hierarquia de índices (MOC) em 00-meta/indices/ a partir do DISCO. Zero LLM.
+    Graph view: _mapa-geral → sub-temas (pasta de cada nota) → notas.
+    Apaga sub-temas que não existem mais. Retorna (nº de notas, nº de sub-temas)."""
     import datetime
+    from collections import defaultdict
     today = datetime.date.today().isoformat()
 
-    # Coleta todos os IDs únicos e seus metadados do ChromaDB
-    all_meta = col.get(include=["metadatas"])
-    seen_notes: dict[str, dict] = {}
-    for meta in all_meta.get("metadatas", []):
-        nid = meta.get("note_id", "")
-        if not nid or _is_settings_note(nid):
-            continue
-        if nid not in seen_notes:
-            seen_notes[nid] = {
-                "title": meta.get("title") or nid.split("/")[-1].replace(".md", "").replace("-", " ").title(),
-                "date":  meta.get("date", ""),
-            }
-
-    # Agrupa por SUB-TEMA = pasta imediata da nota (ex.: knowledge/iqvia/x.md → iqvia)
-    from collections import defaultdict
-    by_sub: dict[str, list] = defaultdict(list)
+    notes = _disk_notes(vault)
+    by_sub: dict = defaultdict(list)
     roots = set()
-    for nid, meta in seen_notes.items():
-        parts = nid.split("/")
+    for n in notes:
+        parts = n["link"].split("/")
         if len(parts) >= 2:
             roots.add(parts[0])
             sub = parts[-2]
         else:
             sub = "sem-categoria"
-        by_sub[sub].append((nid, meta))
+        by_sub[sub].append(n)
 
-    # Limpa os índices por pasta raiz antigos (agora redundantes)
+    # Limpa índices antigos: por pasta raiz (formato anterior) e sub-temas sem notas.
     for root in roots:
         try:
             vault_fs.delete_note(vault, f"00-meta/indices/{root}.md")
         except Exception:
             pass
+    # (list_notes ignora 00-meta de propósito, então lista a pasta direto.)
+    wanted = {f"{sub}.md".lower() for sub in by_sub}
+    subs_dir = vault_fs.vault_dir(vault) / INDEX_SUBS_DIR
+    if subs_dir.is_dir():
+        for f in subs_dir.glob("*.md"):
+            if f.name.lower() not in wanted:
+                try:
+                    f.unlink()
+                    log.info(f"[indices] removido sub-tema sem notas: {f.name}")
+                except Exception:
+                    pass
 
-    # Um índice por SUB-TEMA (categoria) → hub no graph view, ligado às suas notas
-    for sub, notes in sorted(by_sub.items()):
+    def _write_if_changed(path: str, content: str) -> None:
+        # Ignora a linha de data ao comparar: evita reescrever o arquivo todo dia.
+        strip = lambda t: re.sub(r"(?m)^date: .*$|gerado automaticamente em .*$", "", t)
+        try:
+            if strip(vault_fs.read_note(vault, path)) == strip(content):
+                return
+        except Exception:
+            pass
+        vault_fs.write_note(vault, path, content)
+
+    for sub, items in sorted(by_sub.items()):
         lines = [
-            f"---",
-            f"title: Sub-tema — {sub}",
-            f"date: {today}",
-            f"tags:",
-            f"  - indice",
-            f"  - sub-tema",
-            f"  - auto-gerado",
-            f"---",
-            f"",
-            f"# Sub-tema: {sub}",
-            f"",
-            f"> {len(notes)} nota(s) · gerado automaticamente",
-            f"",
+            "---", f"title: Sub-tema — {sub}", f"date: {today}", "tags:",
+            "  - indice", "  - sub-tema", "  - auto-gerado", "---", "",
+            f"# Sub-tema: {sub}", "", f"> {len(items)} nota(s) · gerado automaticamente", "",
         ]
-        for nid, meta in sorted(notes, key=lambda x: x[0]):
-            target = nid[:-3] if nid.endswith(".md") else nid
-            lines.append(f"- [[{target}|{meta['title']}]]")
-        tool_create_note(f"00-meta/indices/sub-temas/{sub}.md", "\n".join(lines), db=vault)
-    log.info(f"[indices] {len(by_sub)} índice(s) de sub-tema em 00-meta/indices/sub-temas/")
+        for n in sorted(items, key=lambda x: x["link"].lower()):
+            lines.append(f"- [[{n['link']}|{n['title']}]]")
+        _write_if_changed(f"{INDEX_SUBS_DIR}/{sub}.md", "\n".join(lines) + "\n")
+    log.info(f"[indices] {len(by_sub)} índice(s) de sub-tema em {INDEX_SUBS_DIR}/")
 
-    # Mapa geral → liga APENAS aos sub-temas (categorias). Hierarquia limpa no graph.
     map_lines = [
-        f"---",
-        f"title: Mapa Geral do Vault",
-        f"date: {today}",
-        f"tags:",
-        f"  - indice",
-        f"  - mapa",
-        f"  - auto-gerado",
-        f"---",
-        f"",
-        f"# Mapa Geral — {vault}",
-        f"",
-        f"> {len(seen_notes)} nota(s) · {len(by_sub)} sub-tema(s) · gerado automaticamente em {today}",
-        f"",
-        f"## Sub-temas",
+        "---", "title: Mapa Geral do Vault", f"date: {today}", "tags:",
+        "  - indice", "  - mapa", "  - auto-gerado", "---", "",
+        f"# Mapa Geral — {vault}", "",
+        f"> {len(notes)} nota(s) · {len(by_sub)} sub-tema(s) · gerado automaticamente em {today}",
+        "", "## Sub-temas",
     ]
-    for sub in sorted(by_sub):
-        map_lines.append(f"- [[00-meta/indices/sub-temas/{sub}|{sub}]] ({len(by_sub[sub])})")
-
-    tool_create_note("00-meta/indices/_mapa-geral.md", "\n".join(map_lines), db=vault)
-    log.info(f"[indices] _mapa-geral.md → {len(by_sub)} sub-temas, {len(seen_notes)} notas")
+    for sub in sorted(by_sub, key=str.lower):
+        map_lines.append(f"- [[{INDEX_SUBS_DIR}/{sub}|{sub}]] ({len(by_sub[sub])})")
+    _write_if_changed("00-meta/indices/_mapa-geral.md", "\n".join(map_lines) + "\n")
+    log.info(f"[indices] _mapa-geral.md → {len(by_sub)} sub-temas, {len(notes)} notas")
+    return len(notes), len(by_sub)
 
 
 def _is_settings_note(note_id: str) -> bool:
@@ -1725,116 +1731,113 @@ def summarize_meeting(note_id: str, vault: Optional[str] = None) -> dict:
     return ask(f"Leia a nota {note_id} e gere: resumo executivo, decisões tomadas, action items com responsável e prazo, pontos que precisam de follow-up.", vault=vault)
 
 
+RELATED_HEADER = "## Notas Relacionadas"
+_RELATED_RE = re.compile(r"(?ms)^## Notas Relacionadas[^\n]*\n.*?(?=^#{1,2} |\Z)")
+
+
+def _set_related_section(content: str, links: list) -> str:
+    """Reescreve a seção (auto-gerada) '## Notas Relacionadas' com os links atuais.
+    Sem links, remove a seção. Links para notas movidas/apagadas somem sozinhos."""
+    body = _RELATED_RE.sub("", content).rstrip()
+    if not links:
+        return body + "\n"
+    return body + "\n\n" + RELATED_HEADER + "\n" + "\n".join(links) + "\n"
+
+
 def vault_review(vault: Optional[str] = None) -> dict:
-    """Revisão do vault via ChromaDB (zero LLM). Uma coleção por vault.
-    Descobre correlações vetoriais e adiciona wiki links nas notas."""
-    db                   = vault
-    SIMILARITY_THRESHOLD = 0.78
-    MAX_LINKS_PER_NOTE   = 5
+    """Correlaciona as notas (zero LLM) e mantém a seção '## Notas Relacionadas'.
 
-    note_ids_raw = tool_list_notes(db=db)
-    try:
-        all_note_ids = set(json.loads(note_ids_raw))
-    except Exception:
-        return {"answer": "Erro ao listar notas.", "sources": []}
-
-    if not all_note_ids:
-        return {"answer": "Vault vazio.", "sources": []}
+    - Vetor de cada nota = média dos vetores dos seus chunks (não só o 1º chunk,
+      que é dominado pelo frontmatter).
+    - Similaridade = cosseno calculado aqui (a coleção do Chroma usa L2; o código
+      antigo tratava a distância L2 como cosseno e quase nada passava do limiar).
+    - Limiar adaptativo: média + K desvios da similaridade entre todos os pares
+      (modelos como o e5 têm similaridade-base alta). CORRELATE_STD_K (padrão 1.5)
+      ou CORRELATE_MIN_SIM (limiar fixo) ajustam.
+    - Lista de notas e caminhos dos links vêm do DISCO (caminho real, com maiúsculas)."""
+    import numpy as np
+    MAX_LINKS = int(os.environ.get("CORRELATE_MAX_LINKS", "5"))
+    STD_K = float(os.environ.get("CORRELATE_STD_K", "1.5"))
+    FIXED = os.environ.get("CORRELATE_MIN_SIM", "").strip()
 
     vault_name = _vault(vault)
-    chroma     = get_chroma()
+    notes = _disk_notes(vault_name)
+    if not notes:
+        return {"answer": "Vault vazio.", "sources": []}
+    by_id = {n["id"]: n for n in notes}
 
     try:
-        col  = chroma.get_collection(_col_name(vault_name))
-        data = col.get(include=["embeddings", "metadatas"])
+        col = get_chroma().get_collection(_col_name(vault_name))
     except Exception:
-        return {"answer": "ChromaDB: vault não indexado — execute o watcher primeiro.", "sources": []}
+        return {"answer": "ChromaDB: vault ainda não indexado pelo watcher.", "sources": []}
 
-    # Embedding representativo por nota (primeiro chunk)
-    note_embeddings: dict[str, list] = {}
-    for emb, meta in zip(data["embeddings"], data["metadatas"]):
-        nid = meta.get("note_id", "")
-        if nid and nid in all_note_ids and not _is_settings_note(nid) and nid not in note_embeddings:
-            note_embeddings[nid] = emb
+    # Soma dos vetores dos chunks por nota (lido em páginas)
+    sums, counts, dims = {}, {}, {}
+    page, offset = 500, 0
+    while True:
+        data = col.get(include=["embeddings", "metadatas"], limit=page, offset=offset)
+        embs = data.get("embeddings")
+        metas = data.get("metadatas")
+        if embs is None:
+            embs = []
+        if metas is None:
+            metas = []
+        if len(metas) == 0:
+            break
+        for emb, meta in zip(embs, metas):
+            nid = (meta or {}).get("note_id", "")
+            if nid not in by_id:
+                continue
+            v = np.asarray(emb, dtype=np.float32)
+            dims[v.shape[0]] = dims.get(v.shape[0], 0) + 1
+            if nid in sums and sums[nid].shape != v.shape:
+                continue
+            sums[nid] = sums[nid] + v if nid in sums else v.copy()
+            counts[nid] = counts.get(nid, 0) + 1
+        offset += len(metas)
+        if len(metas) < page:
+            break
 
-    if not note_embeddings:
-        return {"answer": "Nenhuma nota indexada no ChromaDB.", "sources": []}
+    if not sums:
+        return {"answer": "Nenhuma nota indexada no ChromaDB ainda.", "sources": []}
+    dim = max(dims, key=dims.get)          # ignora vetores de um modelo anterior
+    ids = [i for i in sums if sums[i].shape[0] == dim]
+    if len(ids) < 2:
+        return {"answer": "Notas indexadas insuficientes para correlacionar.", "sources": []}
+    M = np.stack([sums[i] / counts[i] for i in ids])
+    M /= (np.linalg.norm(M, axis=1, keepdims=True) + 1e-9)
+    S = M @ M.T
+    n = len(ids)
+    tri = S[np.triu_indices(n, 1)]
+    thr = float(FIXED) if FIXED else float(tri.mean() + STD_K * tri.std())
+    np.fill_diagonal(S, -1.0)
 
-    log.info(f"vault_review: {len(note_embeddings)} notas, buscando correlações ≥ {SIMILARITY_THRESHOLD}")
-
-    # Correlações via queries vetoriais (sem LLM)
-    note_to_similar: dict[str, list] = {}
-    for note_id, embedding in note_embeddings.items():
-        try:
-            r = col.query(
-                query_embeddings=[embedding],
-                n_results=MAX_LINKS_PER_NOTE + 2,
-                include=["metadatas", "distances"],
-            )
-            seen, similars = {note_id}, []
-            for meta, dist in zip(r["metadatas"][0], r["distances"][0]):
-                sim_id = meta.get("note_id", "")
-                score  = round(1 - dist, 3)
-                if sim_id and sim_id not in seen and score >= SIMILARITY_THRESHOLD \
-                        and not _is_settings_note(sim_id) and sim_id in all_note_ids:
-                    similars.append((sim_id, score))
-                    seen.add(sim_id)
-            if similars:
-                note_to_similar[note_id] = sorted(similars, key=lambda x: -x[1])[:MAX_LINKS_PER_NOTE]
-        except Exception:
-            pass
-
-    log.info(f"vault_review: {len(note_to_similar)} notas com correlações")
-
-    # Lê apenas notas com links faltando (k << n)
     edited = []
-    for note_id, similars in note_to_similar.items():
-        content = tool_read_note(note_id, db=db)
-        if content.startswith("Erro") or content == "(nota vazia)":
+    for idx, nid in enumerate(ids):
+        row = S[idx]
+        order = np.argsort(-row)[:MAX_LINKS]
+        neigh = [ids[j] for j in order if row[j] >= thr]
+        links = [f"- [[{by_id[t]['link']}|{by_id[t]['title']}]]" for t in neigh]
+        path = by_id[nid]["link"] + ".md"
+        try:
+            content = vault_fs.read_note(vault_name, path)
+        except Exception:
             continue
-
-        # Corrige wiki links sem alias via regex
-        new_content = re.sub(
-            r'\[\[([^|\]\n]+)\]\]',
-            lambda m: f'[[{m.group(1)}|{m.group(1).split("/")[-1].replace("-", " ").title()}]]',
-            content,
-        )
-
-        missing = [(sid, sc) for sid, sc in similars if f'[[{sid}' not in new_content]
-        if not missing and new_content == content:
+        new_content = _set_related_section(content, links)
+        if new_content.rstrip() == content.rstrip():
             continue
+        vault_fs.write_note(vault_name, path, new_content)
+        edited.append(nid)
 
-        if missing:
-            links_md = "\n".join(
-                f"- [[{sid}|{sid.split('/')[-1].replace('-', ' ').title()}]]"
-                for sid, _ in missing
-            )
-            if "## Notas Relacionadas" in new_content:
-                new_content = re.sub(
-                    r'(## Notas Relacionadas\n)',
-                    lambda m: m.group(1) + links_md + "\n",
-                    new_content, count=1,
-                )
-            else:
-                new_content = new_content.rstrip() + f"\n\n## Notas Relacionadas\n{links_md}\n"
-
-        tool_edit_note(note_id, new_content, db=db)
-        edited.append(note_id)
-        log.info(f"vault_review: {note_id} +{len(missing)} link(s)")
-
-    if not edited:
-        return {
-            "answer": f"Vault revisado: {len(note_embeddings)} notas analisadas. Nenhuma atualização necessária.",
-            "sources": [],
-        }
-
-    state.record_event(vault_name, actor="system", kind="correlate",
-                       summary=f"Correlacionou notas e adicionou links em {len(edited)} nota(s)", source="chromadb")
-    return {
-        "answer": (
-            f"Vault revisado via ChromaDB — {len(note_embeddings)} notas, zero chamadas LLM.\n"
-            f"{len(edited)} nota(s) atualizada(s):\n\n"
-            + "\n".join(f"- `{n}`" for n in edited)
-        ),
-        "sources": edited,
-    }
+    not_indexed = len(notes) - len(ids)
+    log.info(f"vault_review: {n} notas, limiar {thr:.3f}, {len(edited)} atualizada(s)")
+    if edited:
+        state.record_event(vault_name, actor="system", kind="correlate",
+                           summary=f"Atualizou 'Notas Relacionadas' em {len(edited)} nota(s)",
+                           source="chromadb")
+    lines = [f"🔗 Correlação: {n} nota(s) analisadas · limiar de similaridade {thr:.3f}",
+             f"- {len(edited)} nota(s) com 'Notas Relacionadas' atualizada(s)"]
+    if not_indexed > 0:
+        lines.append(f"- {not_indexed} nota(s) do disco ainda não estão no índice "
+                     f"(o watcher indexa em instantes)")
+    return {"answer": "\n".join(lines), "sources": edited[:20]}
