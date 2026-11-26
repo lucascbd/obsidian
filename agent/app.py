@@ -427,9 +427,24 @@ HTML = """<!DOCTYPE html>
     appendTyping(); setBusy(true);
     try{var r=await fetch('/api/reorg',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vault:getRoot(),apply:apply})});
       if(!r.ok){var t=await r.text();removeTyping();appendMsg('agent','❌ Erro '+r.status+': '+t.slice(0,300));setBusy(false);return;}
-      var d=await r.json();removeTyping();appendMsg('agent',d.answer,d.sources);}
+      var d=await r.json();removeTyping();var m=appendMsg('agent',d.answer,d.sources);
+      if(apply&&d.running){pollReorg();}}
     catch(e){removeTyping();appendMsg('agent','❌ Erro de conexão/timeout ao organizar: '+e);}
     setBusy(false);
+  }
+  // Acompanha a organização em andamento numa única bolha, atualizada a cada 5s.
+  var _reorgTimer=null;
+  function pollReorg(){
+    if(_reorgTimer)clearInterval(_reorgTimer);
+    var msg=appendMsg('agent','⏳ Organizando…');var b=msg.querySelector('.bubble');
+    async function tick(){
+      try{var r=await fetch('/api/reorg/status');var d=await r.json();
+        var head=d.running?'⏳ **Organizando o vault…**':('🗂 **Organização '+(d.result||'finalizada')+'**');
+        b.innerHTML=renderMarkdown(head+'\\n\\n'+(d.text||''));
+        if(!d.running){clearInterval(_reorgTimer);_reorgTimer=null;}
+      }catch(e){}
+    }
+    tick();_reorgTimer=setInterval(tick,5000);
   }
   function reorgSim(){ _reorg(false); }
   function reorgApply(){ if(confirm('Aplicar a organização? Isso move as notas e reescreve os wiki links. Recomendo simular antes.')) _reorg(true); }
@@ -761,6 +776,11 @@ def api_analyze_stream():
 @app.route("/api/stop", methods=["POST"])
 def api_stop():
     stop_agent()
+    try:
+        import organizer
+        organizer.cancel()
+    except Exception:
+        pass
     return jsonify({"status": "stopped"})
 
 
@@ -1009,6 +1029,12 @@ def api_maintenance():
     data  = request.get_json(silent=True) or {}
     vault = data.get("vault") or None
     return jsonify(obsidian_maintenance(vault=vault))
+
+
+@app.route("/api/reorg/status", methods=["GET"])
+def api_reorg_status():
+    import organizer
+    return jsonify(organizer.status())
 
 
 @app.route("/api/reorg", methods=["POST"])

@@ -225,11 +225,22 @@ def _apply_move(vault: str, src: str, dst: str) -> dict:
     return {"from": src, "to": new_id, "links_updated": links}
 
 
-def _compute_moves(vault: str, cats: list, instr: str, use_llm: bool, limit: int) -> list:
-    """Calcula os movimentos REUSANDO os embeddings já no ChromaDB (sem reler/re-embed).
-    O LLM só é chamado (se use_llm) nos empates."""
+def _current_category(nid: str) -> str:
+    parts = nid.split("/")
+    return parts[1] if len(parts) >= 3 and parts[0] == KNOWLEDGE else ""
+
+
+def _iter_moves(vault: str, cats: list, instr: str, use_llm: bool, st: dict = None):
+    """Gera os movimentos UM A UM (quem consome pode aplicar na hora), REUSANDO os
+    embeddings já no ChromaDB. Empate (top1 - top2 < MARGIN):
+      - se a pasta atual da nota está entre as candidatas → mantém (sem LLM);
+      - senão, com use_llm, o LLM desempata; se o limite do Pro estourar, as notas
+        empatadas restantes ficam onde estão (o resto segue normalmente).
+    `st` (opcional) recebe o progresso e pode pedir cancelamento (st["cancel"])."""
     import numpy as np
+    import sdk_llm
     from core.indexer import get_collection
+    st = st if st is not None else {}
     col = get_collection(vault)
     names, mat = _vectors(cats)
 
@@ -257,57 +268,140 @@ def _compute_moves(vault: str, cats: list, instr: str, use_llm: bool, limit: int
         if len(metas) < page:
             break
 
-    moves = []
+    st["total"] = len(note_vec)
+    st["phase"] = "classificando e movendo"
+    rate_limited = False
     for nid, emb in note_vec.items():
-        q = np.array(list(emb), dtype=float)
+        if st.get("cancel"):
+            return
+        st["processed"] = st.get("processed", 0) + 1
+        q = np.asarray(emb, dtype=float)
+        if q.shape[0] != mat.shape[1]:
+            raise RuntimeError("o índice ainda está com vetores do modelo anterior — "
+                               "aguarde o watcher terminar de reindexar e rode de novo")
         q = q / (np.linalg.norm(q) + 1e-9)
         sims = mat @ q
         order = list(np.argsort(-sims)[:TOP_K])
         sl = [(names[i], float(sims[i])) for i in order]
         meta = note_meta[nid]
-        title = meta.get("title") or nid.split("/")[-1].replace(".md", "")
-        date = meta.get("date") or ""
+        # Sem title/date no frontmatter, usa o nome do arquivo — tirando o prefixo de
+        # data, senão cada execução renomearia de novo (2026-11-26-2026-11-26-...).
+        stem = nid.split("/")[-1][:-3] if nid.endswith(".md") else nid.split("/")[-1]
+        m_date = re.match(r"(\d{4}-\d{2}-\d{2})-?(.*)$", stem)
+        title = meta.get("title") or (m_date.group(2) if m_date and m_date.group(2) else stem)
+        date = str(meta.get("date") or (m_date.group(1) if m_date else ""))
+        cands = [c for c, _ in sl]
+        cur = _current_category(nid)
 
-        if use_llm and len(sl) > 1 and (sl[0][1] - sl[1][1]) < MARGIN:
-            try:
-                content = vault_fs.read_note(vault, nid)
-            except Exception:
-                content = ""
-            cat = _llm_tiebreak(title, meta.get("source", ""), content,
-                                [c for c, _ in sl], instr) or sl[0][0]
+        if len(sl) > 1 and (sl[0][1] - sl[1][1]) < MARGIN:
+            if cur in cands:
+                cat = cur
+                st["kept_tie"] = st.get("kept_tie", 0) + 1
+            elif use_llm and not rate_limited:
+                try:
+                    content = vault_fs.read_note(vault, nid)
+                except Exception:
+                    content = ""
+                try:
+                    cat = _llm_tiebreak(title, meta.get("source", ""), content, cands, instr) or sl[0][0]
+                    st["llm"] = st.get("llm", 0) + 1
+                except sdk_llm.LLMRateLimited:
+                    rate_limited = True
+                    st["skipped_rate"] = st.get("skipped_rate", 0) + 1
+                    log.warning("[reorg] limite do LLM — empates restantes ficam onde estão")
+                    continue
+            elif use_llm:
+                st["skipped_rate"] = st.get("skipped_rate", 0) + 1
+                continue
+            else:
+                cat = sl[0][0]
         else:
             cat = sl[0][0]
 
         target = build_path(cat, title, date)
         if target.lower() != nid.lower():
-            moves.append({"from": nid, "to": target, "category": cat})
-            if len(moves) >= limit:
-                break
+            yield {"from": nid, "to": target, "category": cat}
+
+
+def _compute_moves(vault: str, cats: list, instr: str, use_llm: bool, limit: int) -> list:
+    moves = []
+    for m in _iter_moves(vault, cats, instr, use_llm):
+        moves.append(m)
+        if len(moves) >= limit:
+            break
     return moves
 
 
-_applying = {"running": False}
+_applying = {"running": False, "cancel": False, "thread": None}
+
+
+def cancel() -> bool:
+    """Pede para a organização em andamento parar (após a nota atual)."""
+    if _applying.get("running"):
+        _applying["cancel"] = True
+        return True
+    return False
+
+
+def _fmt_status(st: dict) -> str:
+    import time
+    mins = int((time.time() - st.get("started", time.time())) // 60)
+    lines = [
+        f"Notas analisadas: **{st.get('processed', 0)}/{st.get('total', 0) or '?'}**",
+        f"Movidas: **{st.get('moved', 0)}**" + (f" · erros: {st['errors']}" if st.get("errors") else ""),
+        f"Empates mantidos na pasta atual: {st.get('kept_tie', 0)} · desempates pelo LLM: {st.get('llm', 0)}",
+    ]
+    if st.get("skipped_rate"):
+        lines.append(f"⚠️ Limite do Claude atingido: {st['skipped_rate']} empate(s) ficaram onde estavam")
+    if st.get("last"):
+        lines.append(f"Última: `{st['last']}`")
+    lines.append(f"_{st.get('phase', '')} — {mins} min_")
+    return "\n".join(lines)
+
+
+def status() -> dict:
+    """Progresso da organização (para a UI acompanhar)."""
+    st = _applying
+    t = st.get("thread")
+    if st.get("running") and t is not None and not t.is_alive():
+        st["running"] = False  # thread morreu sem limpar o estado
+    return {"running": bool(st.get("running")), "result": st.get("result", ""),
+            "text": _fmt_status(st) if st.get("started") else "",
+            "processed": st.get("processed", 0), "total": st.get("total", 0),
+            "moved": st.get("moved", 0)}
 
 
 def _apply_worker(vault: str):
-    _applying["running"] = True
+    import time
+    st = _applying
+    st.update(running=True, cancel=False, vault=vault, phase="lendo o índice", total=0,
+              processed=0, moved=0, llm=0, kept_tie=0, skipped_rate=0, errors=0,
+              started=time.time(), last="", result="")
     try:
         instr = load_instructions(vault)
         cats = parse_taxonomy(instr) if instr else []
-        moves = _compute_moves(vault, cats, instr, use_llm=True, limit=100000)
-        log.info(f"[reorg] aplicando {len(moves)} move(s)…")
-        done = 0
-        for m in moves:
+        for m in _iter_moves(vault, cats, instr, use_llm=True, st=st):
+            if st.get("cancel"):
+                break
             try:
                 _apply_move(vault, m["from"], m["to"])
-                done += 1
+                st["moved"] += 1
+                st["last"] = m["to"]
             except Exception as e:
+                st["errors"] += 1
                 log.error(f"[reorg] erro em {m['from']}: {e}")
-        log.info(f"[reorg] concluído: {done}/{len(moves)} nota(s) reorganizada(s)")
+            if st["processed"] % 25 == 0:
+                log.info(f"[reorg] {st['processed']}/{st['total']} analisadas, {st['moved']} movidas")
+        st["result"] = "cancelado" if st.get("cancel") else "concluído"
+        st["phase"] = st["result"]
+        log.info(f"[reorg] {st['result']}: {st['moved']} movida(s) de {st['processed']}/{st['total']} "
+                 f"analisada(s); {st['llm']} desempate(s) LLM, {st['kept_tie']} mantida(s)")
     except Exception as e:
+        st["result"] = f"erro: {e}"
+        st["phase"] = st["result"]
         log.error(f"[reorg] worker erro: {e}")
     finally:
-        _applying["running"] = False
+        st["running"] = False
 
 
 def reorg(vault: str, apply: bool = False, limit: int = 300) -> dict:
@@ -329,11 +423,13 @@ def reorg(vault: str, apply: bool = False, limit: int = 300) -> dict:
             lines.append(f"- _(+{len(moves) - 60} … rode o aplicar p/ o restante)_")
         return {"answer": "\n".join(lines), "moves": moves, "sources": []}
 
-    if _applying["running"]:
-        return {"answer": "⏳ Organização já está rodando em background.", "moves": [], "sources": []}
+    if status()["running"]:
+        return {"answer": "⏳ A organização já está rodando:\n\n" + _fmt_status(_applying),
+                "moves": [], "sources": [], "running": True}
     import threading
-    threading.Thread(target=_apply_worker, args=(vault,), daemon=True, name="reorg-apply").start()
-    return {"answer": "🗂 Organização iniciada em background. As notas vão sendo movidas e os "
-                      "wiki links reescritos — acompanhe no vault (e nos eventos `reorg`). "
-                      "O log do agente mostra `[reorg] concluído: N/M`.",
-            "moves": [], "sources": []}
+    t = threading.Thread(target=_apply_worker, args=(vault,), daemon=True, name="reorg-apply")
+    _applying["thread"] = t
+    t.start()
+    return {"answer": "🗂 Organização iniciada. Cada nota é movida assim que é classificada "
+                      "(os wiki links são reescritos junto). O ⛔ interrompe.",
+            "moves": [], "sources": [], "running": True}
