@@ -176,3 +176,13 @@ def fix_tags_in_frontmatter(fm_body: str) -> str:
         return "\n".join(out)
 
     return re.sub(r"^tags:.*?(?=\n\w|\Z)", _replace, fm_body, flags=re.MULTILINE | re.DOTALL)
+
+
+# Seção auto-gerada pela manutenção (links para notas parecidas). Não entra no
+# embedding: senão reescrever a seção mudaria o vetor da nota, que mudaria os
+# vizinhos, que reescreveria a seção de novo a cada manutenção.
+RELATED_SECTION_RE = re.compile(r"(?ms)^## Notas Relacionadas[^\n]*\n.*?(?=^#{1,2} |\Z)")
+
+
+def strip_related_section(content: str) -> str:
+    return RELATED_SECTION_RE.sub("", content or "")

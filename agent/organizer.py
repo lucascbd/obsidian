@@ -230,7 +230,8 @@ def _current_category(nid: str) -> str:
     return parts[1] if len(parts) >= 3 and parts[0] == KNOWLEDGE else ""
 
 
-def _iter_moves(vault: str, cats: list, instr: str, use_llm: bool, st: dict = None):
+def _iter_moves(vault: str, cats: list, instr: str, use_llm: bool, st: dict = None,
+                only_ids: set = None):
     """Gera os movimentos UM A UM (quem consome pode aplicar na hora), REUSANDO os
     embeddings já no ChromaDB. Empate (top1 - top2 < MARGIN):
       - se a pasta atual da nota está entre as candidatas → mantém (sem LLM);
@@ -262,12 +263,16 @@ def _iter_moves(vault: str, cats: list, instr: str, use_llm: bool, st: dict = No
             nid = (meta or {}).get("note_id", "")
             if not nid or is_meta(nid) or nid in note_vec:
                 continue
+            if only_ids is not None and nid not in only_ids:
+                continue
             note_vec[nid] = np.asarray(emb, dtype=np.float32)
             note_meta[nid] = meta
         offset += len(metas)
         if len(metas) < page:
             break
 
+    # Notas pedidas que o watcher ainda não indexou: ficam para a próxima vez.
+    st["pending"] = set(only_ids) - set(note_vec) if only_ids is not None else set()
     st["total"] = len(note_vec)
     st["phase"] = "classificando e movendo"
     rate_limited = False
@@ -308,10 +313,12 @@ def _iter_moves(vault: str, cats: list, instr: str, use_llm: bool, st: dict = No
                 except sdk_llm.LLMRateLimited:
                     rate_limited = True
                     st["skipped_rate"] = st.get("skipped_rate", 0) + 1
+                    st.setdefault("skipped_ids", set()).add(nid)
                     log.warning("[reorg] limite do LLM — empates restantes ficam onde estão")
                     continue
             elif use_llm:
                 st["skipped_rate"] = st.get("skipped_rate", 0) + 1
+                st.setdefault("skipped_ids", set()).add(nid)
                 continue
             else:
                 cat = sl[0][0]
@@ -330,6 +337,46 @@ def _compute_moves(vault: str, cats: list, instr: str, use_llm: bool, limit: int
         if len(moves) >= limit:
             break
     return moves
+
+
+def keep_dirs(cats: list) -> set:
+    """Pastas que nunca são apagadas por estarem vazias: knowledge/ e as categorias fixas."""
+    return {KNOWLEDGE} | {f"{KNOWLEDGE}/{c}" for c in cats}
+
+
+def finalize(vault: str) -> dict:
+    """Depois de mover notas: refaz os índices (00-meta/indices) e apaga pastas vazias."""
+    import agent
+    instr = load_instructions(vault)
+    cats = parse_taxonomy(instr) if instr else []
+    n_notes, n_subs = agent._build_vault_indices(vault)
+    removed = vault_fs.remove_empty_dirs(vault, keep=keep_dirs(cats))
+    return {"notes": n_notes, "subs": n_subs, "removed_dirs": removed}
+
+
+def organize_notes(vault: str, ids: set, st: dict = None) -> dict:
+    """Organiza (classifica + move) SÓ as notas em `ids`. Usado pela manutenção
+    incremental. Retorna contadores e as notas ainda não indexadas (pending)."""
+    st = st if st is not None else {}
+    st.update(processed=0, moved=0, llm=0, kept_tie=0, skipped_rate=0, errors=0, last="",
+              skipped_ids=set())
+    instr = load_instructions(vault)
+    cats = parse_taxonomy(instr) if instr else []
+    if not cats or not ids:
+        return {"moved": 0, "analyzed": 0, "llm": 0, "skipped_rate": 0, "pending": set(ids or ())}
+    for m in _iter_moves(vault, cats, instr, use_llm=True, st=st, only_ids=set(ids)):
+        if st.get("cancel"):
+            break
+        try:
+            _apply_move(vault, m["from"], m["to"])
+            st["moved"] += 1
+            st["last"] = m["to"]
+        except Exception as e:
+            st["errors"] += 1
+            log.error(f"[reorg] erro em {m['from']}: {e}")
+    return {"moved": st["moved"], "analyzed": st.get("processed", 0), "llm": st.get("llm", 0),
+            "skipped_rate": st.get("skipped_rate", 0),
+            "pending": set(st.get("pending", set())) | set(st.get("skipped_ids", set()))}
 
 
 _applying = {"running": False, "cancel": False, "thread": None}
@@ -351,6 +398,8 @@ def _fmt_status(st: dict) -> str:
         f"Movidas: **{st.get('moved', 0)}**" + (f" · erros: {st['errors']}" if st.get("errors") else ""),
         f"Empates mantidos na pasta atual: {st.get('kept_tie', 0)} · desempates pelo LLM: {st.get('llm', 0)}",
     ]
+    if st.get("removed_dirs"):
+        lines.append(f"Pastas vazias removidas: {st['removed_dirs']} · índices refeitos")
     if st.get("skipped_rate"):
         lines.append(f"⚠️ Limite do Claude atingido: {st['skipped_rate']} empate(s) ficaram onde estavam")
     if st.get("last"):
@@ -376,7 +425,7 @@ def _apply_worker(vault: str):
     st = _applying
     st.update(running=True, cancel=False, vault=vault, phase="lendo o índice", total=0,
               processed=0, moved=0, llm=0, kept_tie=0, skipped_rate=0, errors=0,
-              started=time.time(), last="", result="")
+              removed_dirs=0, started=time.time(), last="", result="")
     try:
         instr = load_instructions(vault)
         cats = parse_taxonomy(instr) if instr else []
@@ -392,6 +441,12 @@ def _apply_worker(vault: str):
                 log.error(f"[reorg] erro em {m['from']}: {e}")
             if st["processed"] % 25 == 0:
                 log.info(f"[reorg] {st['processed']}/{st['total']} analisadas, {st['moved']} movidas")
+        st["phase"] = "refazendo índices e limpando pastas vazias"
+        try:
+            fin = finalize(vault)
+            st["removed_dirs"] = len(fin["removed_dirs"])
+        except Exception as e:
+            log.error(f"[reorg] erro ao refazer índices/pastas: {e}")
         st["result"] = "cancelado" if st.get("cancel") else "concluído"
         st["phase"] = st["result"]
         log.info(f"[reorg] {st['result']}: {st['moved']} movida(s) de {st['processed']}/{st['total']} "

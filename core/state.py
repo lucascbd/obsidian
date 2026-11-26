@@ -108,6 +108,12 @@ def init_db() -> None:
                 created_at TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_drafts_status ON drafts (vault, status);
+            CREATE TABLE IF NOT EXISTS kv (
+                vault TEXT NOT NULL,
+                key   TEXT NOT NULL,
+                value TEXT,
+                PRIMARY KEY (vault, key)
+            );
             CREATE TABLE IF NOT EXISTS ingest_queue (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 source     TEXT NOT NULL,
@@ -346,6 +352,27 @@ def record_event(vault: str, actor: str, kind: str, summary: str,
             )
     except Exception:
         pass  # log de atividade nunca deve derrubar uma ação
+
+
+def last_event_ts(vault: str, kinds: tuple) -> float:
+    """Timestamp (epoch) do evento mais recente de um dos tipos, ou 0.0."""
+    q = f"SELECT MAX(ts) AS t FROM events WHERE vault=? AND kind IN ({','.join('?' * len(kinds))})"
+    with _conn() as c:
+        row = c.execute(q, (vault, *kinds)).fetchone()
+    return float(row["t"] or 0.0)
+
+
+def kv_get(vault: str, key: str, default=None):
+    with _conn() as c:
+        row = c.execute("SELECT value FROM kv WHERE vault=? AND key=?", (vault, key)).fetchone()
+    return row["value"] if row else default
+
+
+def kv_set(vault: str, key: str, value) -> None:
+    with _lock, _conn() as c:
+        c.execute("INSERT INTO kv (vault, key, value) VALUES (?,?,?) "
+                  "ON CONFLICT(vault, key) DO UPDATE SET value=excluded.value",
+                  (vault, key, str(value)))
 
 
 def query_events(vault: str = None, date_from: str = None, date_to: str = None,

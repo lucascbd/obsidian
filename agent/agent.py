@@ -260,25 +260,152 @@ def reindex_vault(vault: Optional[str] = None) -> dict:
     }
 
 
-def obsidian_maintenance(vault: Optional[str] = None) -> dict:
-    """Manutenção de garantia do Obsidian (zero LLM): correlaciona notas (links
-    '## Notas Relacionadas' via similaridade do Chroma) e regenera os índices MOC.
-    Não rebuilda o ChromaDB — o watcher já mantém o índice em dia."""
-    vaults_to_run = [vault] if vault else get_vaults()
-    parts = []
-    for v in vaults_to_run:
+MAINT_KEY = "last_maintenance_ts"
+_maint_lock = __import__("threading").Lock()
+_maint_job = {"running": False, "thread": None, "phase": "", "answer": "", "result": "", "started": 0.0}
+
+
+def _last_maintenance(vault: str) -> float:
+    """Momento da última manutenção. Na 1ª vez, usa o histórico (último evento de
+    índices/correlação) para não reprocessar o vault inteiro; sem histórico → 0 (tudo)."""
+    ts = state.kv_get(vault, MAINT_KEY)
+    if ts:
         try:
-            parts.append(vault_review(v).get("answer", ""))
-        except Exception as e:
-            log.error(f"[maintenance] correlate erro em {v}: {e}")
-            parts.append(f"[{v}] erro ao correlacionar: {e}")
+            return float(ts)
+        except ValueError:
+            pass
+    return state.last_event_ts(vault, ("maintenance", "indices", "correlate"))
+
+
+def _maintain_vault(v: str, full: bool = False, st: dict = None) -> str:
+    """Manutenção INCREMENTAL de um vault:
+    1. organiza (classifica + move) só as notas novas/alteradas desde a última vez;
+    2. 'Notas Relacionadas' só dessas notas (+ notas com link quebrado);
+    3. refaz os índices 00-meta/indices (do disco, barato) e apaga pastas vazias.
+    O LLM só é usado no passo 1, e só em empates de categoria."""
+    import time
+    import organizer
+    st = st if st is not None else {}
+    t0 = time.time()
+    vault_fs.start_write_log()
+    try:
+        return _maintain_vault_inner(v, full, st, t0)
+    finally:
+        vault_fs.stop_write_log()
+
+
+def _maintain_vault_inner(v: str, full: bool, st: dict, t0: float) -> str:
+    import time
+    import organizer
+    since = 0.0 if full else _last_maintenance(v)
+    notes = _disk_notes(v)
+    new_ids = {n["id"] for n in notes if n["mtime"] > since}
+    when = time.strftime("%d/%m %H:%M", time.localtime(since)) if since else "sempre (1ª vez)"
+    lines = [f"**{v}** — {len(new_ids)} nota(s) nova(s)/alterada(s) desde {when}"]
+
+    pending = set()
+    if new_ids:
+        st["phase"] = f"organizando {len(new_ids)} nota(s) nova(s)"
+        org = organizer.organize_notes(v, new_ids, st)
+        pending = org["pending"]
+        extra = f" · {org['llm']} desempate(s) pelo LLM" if org["llm"] else ""
+        lines.append(f"🗂 Organização: {org['analyzed']} analisada(s), {org['moved']} movida(s){extra}")
+        if org["skipped_rate"]:
+            lines.append(f"⚠️ Limite do Claude: {org['skipped_rate']} nota(s) ficam para a próxima")
+        # Mover preserva a data de modificação: recalcula os ids novos após os movimentos.
+        notes = _disk_notes(v)
+        new_ids = {n["id"] for n in notes if n["mtime"] > since}
+
+    st["phase"] = "atualizando Notas Relacionadas"
+    lines.append(vault_review(v, only_ids=None if full else new_ids)["answer"])
+
+    st["phase"] = "refazendo índices e limpando pastas vazias"
+    fin = organizer.finalize(v)
+    lines.append(f"🗺 Índices: {fin['notes']} nota(s) em {fin['subs']} sub-tema(s) (00-meta/indices)")
+    if fin["removed_dirs"]:
+        shown = ", ".join(f"`{d}`" for d in fin["removed_dirs"][:10])
+        more = f" (+{len(fin['removed_dirs']) - 10})" if len(fin["removed_dirs"]) > 10 else ""
+        lines.append(f"🧹 Pastas vazias removidas: {shown}{more}")
+
+    # Próximo ponto de partida = FIM desta manutenção (o que ela mesma escreveu não
+    # conta como novo). Recuam o ponto, para entrarem na próxima: notas alteradas por
+    # outros durante a execução (ex.: email que chegou), notas ainda não indexadas e
+    # notas puladas pelo limite do Claude.
+    written = getattr(vault_fs._tl, "log", None) or set()
+    final = _disk_notes(v)
+    mt = {n["id"]: n["mtime"] for n in final}
+    late = [n["mtime"] for n in final
+            if n["mtime"] > t0 and n["id"] not in written and n["id"] not in new_ids]
+    held = [mt[i] for i in pending if i in mt]
+    mark = time.time()
+    if late or held:
+        mark = min(late + held) - 1
+    if pending:
+        lines.append(f"⏳ {len(pending)} nota(s) ainda não indexada(s)/pulada(s) — entram na próxima")
+    state.kv_set(v, MAINT_KEY, mark)
+    state.record_event(v, actor="system", kind="maintenance",
+                       summary=f"Manutenção do Obsidian ({len(new_ids)} nota(s) nova(s))", source="obsidian")
+    return "\n".join(lines)
+
+
+def obsidian_maintenance(vault: Optional[str] = None, full: bool = False, st: dict = None) -> dict:
+    """Manutenção do Obsidian (incremental por padrão; full=True processa todas as notas).
+    Uma por vez: se já houver uma rodando, não inicia outra."""
+    if not _maint_lock.acquire(blocking=False):
+        return {"answer": "⏳ Já existe uma manutenção em andamento.", "sources": []}
+    try:
+        parts = []
+        for v in ([vault] if vault else get_vaults()):
+            try:
+                parts.append(_maintain_vault(v, full=full, st=st))
+            except Exception as e:
+                log.error(f"[maintenance] erro em {v}: {e}")
+                parts.append(f"**{v}** — ❌ erro: {e}")
+        return {"answer": "✅ Manutenção do Obsidian concluída\n\n" + "\n\n".join(parts), "sources": []}
+    finally:
+        _maint_lock.release()
+
+
+def start_maintenance(vault: Optional[str] = None, full: bool = False) -> dict:
+    """Roda a manutenção em background (a UI acompanha por maintenance_status)."""
+    import time
+    import threading
+    job = _maint_job
+    t = job.get("thread")
+    if job.get("running") and t is not None and t.is_alive():
+        return {"running": True, "answer": "⏳ A manutenção já está rodando."}
+
+    def _run():
         try:
-            parts.append(rebuild_indices(v).get("answer", ""))
+            job["answer"] = obsidian_maintenance(vault, full=full, st=job)["answer"]
+            job["result"] = "concluída"
         except Exception as e:
-            log.error(f"[maintenance] indices erro em {v}: {e}")
-            parts.append(f"[{v}] erro nos índices: {e}")
-    return {"answer": "✅ Manutenção do Obsidian concluída:\n\n" + "\n\n".join(p for p in parts if p),
-            "sources": []}
+            job["answer"], job["result"] = f"❌ Erro na manutenção: {e}", "com erro"
+        finally:
+            job["running"] = False
+
+    job.update(running=True, phase="iniciando", answer="", result="", started=time.time())
+    job["thread"] = threading.Thread(target=_run, daemon=True, name="obsidian-maintenance")
+    job["thread"].start()
+    return {"running": True,
+            "answer": "🧹 Manutenção iniciada" + (" (todas as notas)" if full else
+                                                  " — só notas novas desde a última")}
+
+
+def maintenance_status() -> dict:
+    import time
+    job = _maint_job
+    t = job.get("thread")
+    if job.get("running") and t is not None and not t.is_alive():
+        job["running"] = False
+    if job.get("running"):
+        mins = int((time.time() - job.get("started", time.time())) // 60)
+        text = f"_{job.get('phase', '')} — {mins} min_"
+        if job.get("total"):
+            text = (f"Notas analisadas: **{job.get('processed', 0)}/{job['total']}** · "
+                    f"movidas: **{job.get('moved', 0)}**\n\n") + text
+        return {"running": True, "result": "", "text": text}
+    return {"running": False, "result": job.get("result", ""), "text": job.get("answer", "")}
 
 
 def rebuild_indices(vault: Optional[str] = None) -> dict:
@@ -304,19 +431,28 @@ def rebuild_indices(vault: Optional[str] = None) -> dict:
 def _disk_notes(vault: str) -> list:
     """Notas do vault lidas do DISCO (fonte da verdade): id (minúsculo), link (caminho
     real, sem .md, para wiki links), título e data do frontmatter. Exclui 00-meta."""
+    from core.text import RELATED_SECTION_RE
     base = vault_fs.vault_dir(vault)
     out = []
     for nid, p in vault_fs.iter_notes(vault):
         rel = p.relative_to(base).as_posix()
         try:
-            fm = _parse_frontmatter(vault_fs.read_path(p))
+            content = vault_fs.read_path(p)
+            fm = _parse_frontmatter(content)
         except Exception:
-            fm = {}
+            content, fm = "", {}
+        try:
+            mtime = p.stat().st_mtime
+        except Exception:
+            mtime = 0.0
+        sec = RELATED_SECTION_RE.search(content)
+        related = re.findall(r"\[\[([^\]|#]+)", sec.group(0)) if sec else []
         stem = re.sub(r"^\d{4}-\d{2}-\d{2}-?", "", p.stem) or p.stem
         title = str(fm.get("title") or stem.replace("-", " ").strip().capitalize())
         out.append({"id": nid, "link": rel[:-3] if rel.endswith(".md") else rel,
                     "title": title.replace("|", "-").replace("]", ")").replace("[", "("),
-                    "date": str(fm.get("date") or "")})
+                    "date": str(fm.get("date") or ""), "mtime": mtime,
+                    "related": [r.strip() for r in related]})
     return out
 
 
@@ -1732,7 +1868,7 @@ def summarize_meeting(note_id: str, vault: Optional[str] = None) -> dict:
 
 
 RELATED_HEADER = "## Notas Relacionadas"
-_RELATED_RE = re.compile(r"(?ms)^## Notas Relacionadas[^\n]*\n.*?(?=^#{1,2} |\Z)")
+from core.text import RELATED_SECTION_RE as _RELATED_RE
 
 
 def _set_related_section(content: str, links: list) -> str:
@@ -1744,8 +1880,12 @@ def _set_related_section(content: str, links: list) -> str:
     return body + "\n\n" + RELATED_HEADER + "\n" + "\n".join(links) + "\n"
 
 
-def vault_review(vault: Optional[str] = None) -> dict:
+def vault_review(vault: Optional[str] = None, only_ids: Optional[set] = None) -> dict:
     """Correlaciona as notas (zero LLM) e mantém a seção '## Notas Relacionadas'.
+
+    only_ids: se informado, só reescreve a seção dessas notas (as novas desde a última
+    manutenção) + das notas antigas cuja seção aponta para nota que não existe mais.
+    A comparação usa o vault todo (as novas ligam às antigas); só a escrita é restrita.
 
     - Vetor de cada nota = média dos vetores dos seus chunks (não só o 1º chunk,
       que é dominado pelo frontmatter).
@@ -1765,6 +1905,14 @@ def vault_review(vault: Optional[str] = None) -> dict:
     if not notes:
         return {"answer": "Vault vazio.", "sources": []}
     by_id = {n["id"]: n for n in notes}
+
+    existing = {n["link"].lower() for n in notes}
+    dead = {n["id"] for n in notes
+            if any(r.lower().removesuffix(".md") not in existing for r in n["related"])}
+    targets = None if only_ids is None else (set(only_ids) | dead)
+    if targets is not None and not targets:
+        return {"answer": "🔗 Notas Relacionadas: nenhuma nota nova desde a última manutenção.",
+                "sources": []}
 
     try:
         col = get_chroma().get_collection(_col_name(vault_name))
@@ -1814,6 +1962,8 @@ def vault_review(vault: Optional[str] = None) -> dict:
 
     edited = []
     for idx, nid in enumerate(ids):
+        if targets is not None and nid not in targets:
+            continue
         row = S[idx]
         order = np.argsort(-row)[:MAX_LINKS]
         neigh = [ids[j] for j in order if row[j] >= thr]
@@ -1835,8 +1985,10 @@ def vault_review(vault: Optional[str] = None) -> dict:
         state.record_event(vault_name, actor="system", kind="correlate",
                            summary=f"Atualizou 'Notas Relacionadas' em {len(edited)} nota(s)",
                            source="chromadb")
-    lines = [f"🔗 Correlação: {n} nota(s) analisadas · limiar de similaridade {thr:.3f}",
-             f"- {len(edited)} nota(s) com 'Notas Relacionadas' atualizada(s)"]
+    scope = (f"{len(targets)} nota(s) nova(s)/alterada(s) ou com link quebrado"
+             if targets is not None else f"todas as {n} nota(s)")
+    lines = [f"🔗 Notas Relacionadas: {scope} · comparadas com {n} nota(s) · limiar {thr:.3f}",
+             f"- {len(edited)} nota(s) atualizada(s)"]
     if not_indexed > 0:
         lines.append(f"- {not_indexed} nota(s) do disco ainda não estão no índice "
                      f"(o watcher indexa em instantes)")

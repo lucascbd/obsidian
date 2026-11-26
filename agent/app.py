@@ -254,7 +254,7 @@ HTML = """<!DOCTYPE html>
 
     <div class="sec">
       <div class="sec-title">Manutenção do Obsidian</div>
-      <div class="hint">Nos horários abaixo, roda a manutenção de garantia do vault (sem custo de LLM): <b>correlaciona</b> as notas (links "Notas Relacionadas") e <b>regenera os índices</b> (00-meta/indices). A busca semântica (ChromaDB) já é mantida em dia pelo watcher — isto <b>não</b> rebuilda o ChromaDB. Horários em hora do servidor.</div>
+      <div class="hint">Nos horários abaixo (e no botão), roda a manutenção do vault <b>só nas notas novas/alteradas desde a última vez</b>: <b>organiza</b> nas categorias do instructions.md (o Claude só entra em empates), atualiza <b>Notas Relacionadas</b>, <b>refaz os índices</b> (00-meta/indices) e <b>apaga pastas vazias</b> (as categorias fixas ficam). Horários em hora do servidor.</div>
       <div class="field">
         <label>Horários agendados</label>
         <div class="times" id="times"></div>
@@ -263,7 +263,8 @@ HTML = """<!DOCTYPE html>
           <button class="btn-sub" onclick="addTime()">+ Adicionar</button>
         </div>
       </div>
-      <button class="btn-sub" onclick="maintenanceNow()">🧹 Rodar manutenção agora</button>
+      <button class="btn-sub" onclick="maintenanceNow(false)">🧹 Rodar manutenção agora (notas novas)</button>
+      <button class="btn-sub" onclick="if(confirm('Processar TODAS as notas? Pode reescrever a seção Notas Relacionadas de muitas notas e usar o Claude nos desempates.'))maintenanceNow(true)">🧹 Manutenção completa (todas as notas)</button>
     </div>
 
     <div class="sec">
@@ -415,10 +416,25 @@ HTML = """<!DOCTYPE html>
     try{await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});}catch(e){}
     closeSettings();appendMsg('agent','⚙️ Configurações salvas. Modelo: '+body.model+(body.reindex_times.length?(' · reindex: '+body.reindex_times.join(', ')):''));
   }
-  async function maintenanceNow(){
-    closeSettings();appendMsg('user','🧹 Manutenção do Obsidian (correlacionar + índices)');appendTyping();setBusy(true);
-    try{var r=await fetch('/api/maintenance',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vault:getRoot()})});var d=await r.json();removeTyping();appendMsg('agent',d.answer,d.sources);}
-    catch(e){removeTyping();appendMsg('agent','❌ Erro na manutenção.');}setBusy(false);
+  async function maintenanceNow(full){
+    closeSettings();appendMsg('user',full?'🧹 Manutenção completa (todas as notas)':'🧹 Manutenção do Obsidian (notas novas)');
+    try{var r=await fetch('/api/maintenance',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vault:getRoot(),full:!!full})});var d=await r.json();
+      if(d.running){pollMaint();}else{appendMsg('agent',d.answer,d.sources);}}
+    catch(e){appendMsg('agent','❌ Erro na manutenção.');}
+  }
+  // Acompanha a manutenção numa única bolha, atualizada a cada 4s.
+  var _maintTimer=null;
+  function pollMaint(){
+    if(_maintTimer)clearInterval(_maintTimer);
+    var msg=appendMsg('agent','⏳ Manutenção em andamento…');var b=msg.querySelector('.bubble');
+    async function tick(){
+      try{var r=await fetch('/api/maintenance/status');var d=await r.json();
+        var txt=d.running?('⏳ **Manutenção em andamento…**\\n\\n'+(d.text||'')):(d.text||'Manutenção finalizada.');
+        b.innerHTML=renderMarkdown(txt);
+        if(!d.running){clearInterval(_maintTimer);_maintTimer=null;}
+      }catch(e){}
+    }
+    tick();_maintTimer=setInterval(tick,4000);
   }
   async function reindexFull(){closeSettings();reindex();}
   async function _reorg(apply){
@@ -1025,10 +1041,18 @@ def api_rebuild_indices():
 
 @app.route("/api/maintenance", methods=["POST"])
 def api_maintenance():
-    """Manutenção do Obsidian: correlaciona notas + regenera índices (zero LLM, sem rebuild do Chroma)."""
+    """Manutenção do Obsidian em background (incremental; full=true processa tudo).
+    A UI acompanha por /api/maintenance/status."""
+    from agent import start_maintenance
     data  = request.get_json(silent=True) or {}
     vault = data.get("vault") or None
-    return jsonify(obsidian_maintenance(vault=vault))
+    return jsonify(start_maintenance(vault=vault, full=bool(data.get("full"))))
+
+
+@app.route("/api/maintenance/status", methods=["GET"])
+def api_maintenance_status():
+    from agent import maintenance_status
+    return jsonify(maintenance_status())
 
 
 @app.route("/api/reorg/status", methods=["GET"])

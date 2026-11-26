@@ -7,11 +7,12 @@ vault (ex.: 'projetos/x/nota.md'). Escrita atômica (tmp + os.replace).
 
 import os
 import shutil
+import threading
 import hashlib
 import logging
 from pathlib import Path
 
-from .config import VAULT_ROOT, IGNORE_DIRS, is_meta
+from .config import VAULT_ROOT, IGNORE_DIRS, META_DIR, is_meta
 
 log = logging.getLogger(__name__)
 
@@ -140,11 +141,33 @@ def _atomic_write(target: Path, content: str) -> None:
     os.replace(tmp, target)
 
 
+# Registro de escritas da thread atual (a manutenção usa para saber o que ELA mesma
+# alterou, sem confundir com notas que chegaram por outras threads no meio-tempo).
+_tl = threading.local()
+
+
+def start_write_log() -> None:
+    _tl.log = set()
+
+
+def stop_write_log() -> set:
+    log_ = getattr(_tl, "log", None) or set()
+    _tl.log = None
+    return log_
+
+
+def _log_write(nid: str) -> None:
+    lg = getattr(_tl, "log", None)
+    if lg is not None:
+        lg.add(nid)
+
+
 def write_note(vault: str, note_id: str, content: str) -> str:
     """Cria ou sobrescreve uma nota. Retorna o note_id normalizado."""
     target = _resolve(vault, note_id)
     _atomic_write(target, content)
     nid = note_id_of(vault, target)
+    _log_write(nid)
     log.info(f"[{vault}] write {nid}")
     return nid
 
@@ -161,7 +184,9 @@ def move_note(vault: str, source_id: str, dest_id: str) -> str:
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(src), str(dst))
     log.info(f"[{vault}] move {source_id} → {dest_id}")
-    return note_id_of(vault, dst)
+    nid = note_id_of(vault, dst)
+    _log_write(nid)
+    return nid
 
 
 def delete_note(vault: str, note_id: str) -> bool:
@@ -171,3 +196,31 @@ def delete_note(vault: str, note_id: str) -> bool:
         log.info(f"[{vault}] delete {note_id}")
         return True
     return False
+
+
+def remove_empty_dirs(vault: str, keep: set = frozenset()) -> list:
+    """Apaga pastas sem nenhum arquivo (inclusive subpastas vazias), das mais fundas
+    para as mais rasas. Nunca mexe em: raiz do vault, 00-meta, pastas ocultas
+    (.obsidian, .trash…) e nas pastas em `keep` (caminhos relativos em minúsculas,
+    ex.: as categorias fixas de instructions.md). Pasta com anexo (imagem, pdf…)
+    não está vazia e fica. Retorna os caminhos removidos."""
+    base = vault_dir(vault)
+    if not base.is_dir():
+        return []
+    keep = {k.lower().strip("/") for k in keep}
+    dirs = [d for d in base.rglob("*") if d.is_dir()]
+    removed = []
+    for d in sorted(dirs, key=lambda p: len(p.parts), reverse=True):
+        rel = d.relative_to(base)
+        if any(part.startswith(".") for part in rel.parts) or rel.parts[0] == META_DIR:
+            continue
+        if rel.as_posix().lower() in keep:
+            continue
+        try:
+            if not any(d.iterdir()):
+                d.rmdir()
+                removed.append(rel.as_posix())
+                log.info(f"[{vault}] pasta vazia removida: {rel.as_posix()}")
+        except OSError:
+            pass
+    return removed

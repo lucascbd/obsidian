@@ -14,7 +14,7 @@ from chromadb.config import Settings
 
 from . import state, vault_fs, embedder
 from .config import CHROMA_HOST, CHROMA_PORT, EMBEDDING_MODEL, col_name, is_meta
-from .text import parse_frontmatter, chunk_by_sections, extract_wiki_links
+from .text import parse_frontmatter, chunk_by_sections, extract_wiki_links, strip_related_section
 
 log = logging.getLogger(__name__)
 
@@ -91,7 +91,7 @@ def index_note(vault: str, note_id: str, content: str, col=None, force: bool = F
         return 0
 
     col = col or get_collection(vault)
-    chunks = chunk_by_sections(content)
+    chunks = chunk_by_sections(strip_related_section(content))
     if not chunks:
         return 0
 
