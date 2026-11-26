@@ -87,11 +87,30 @@ def _inbox():
     return _folder(OL_INBOX)
 
 
-_ME_CACHE = {"name": None}
+_ME_CACHE = {"name": None, "email": None}
+PR_SMTP_ADDRESS = "http://schemas.microsoft.com/mapi/proptag/0x39FE001E"
+
+
+def _smtp_of(address_entry) -> str:
+    """Endereço SMTP de um AddressEntry. No Exchange, .Address é um caminho X500
+    (/O=EXCHANGELABS/...), então resolve pelo usuário/lista do Exchange."""
+    if address_entry is None:
+        return ""
+    try:
+        if (getattr(address_entry, "Type", "") or "").upper() == "EX":
+            user = address_entry.GetExchangeUser()
+            if user is not None and user.PrimarySmtpAddress:
+                return user.PrimarySmtpAddress.lower()
+            dl = address_entry.GetExchangeDistributionList()
+            if dl is not None and dl.PrimarySmtpAddress:
+                return dl.PrimarySmtpAddress.lower()
+        return (address_entry.Address or "").lower()
+    except Exception:
+        return ""
 
 
 def _me():
-    """Nome de exibição do usuário (p/ o agente julgar prioridade: Para vs Cc vs citado)."""
+    """Nome de exibição do usuário (fallback p/ prioridade quando não há endereços)."""
     if _ME_CACHE["name"] is None:
         try:
             outlook = win32com.client.Dispatch("Outlook.Application")
@@ -99,6 +118,46 @@ def _me():
         except Exception:
             _ME_CACHE["name"] = ""
     return _ME_CACHE["name"]
+
+
+def _me_email() -> str:
+    """Endereço SMTP do usuário (prioridade exata: estou no Para? no Cc?)."""
+    if _ME_CACHE["email"] is None:
+        try:
+            outlook = win32com.client.Dispatch("Outlook.Application")
+            _ME_CACHE["email"] = _smtp_of(outlook.GetNamespace("MAPI").CurrentUser.AddressEntry)
+        except Exception:
+            _ME_CACHE["email"] = ""
+    return _ME_CACHE["email"]
+
+
+def _sender_email(item) -> str:
+    try:
+        if (getattr(item, "SenderEmailType", "") or "").upper() == "EX":
+            return _smtp_of(item.Sender)
+        return (getattr(item, "SenderEmailAddress", "") or "").lower()
+    except Exception:
+        return ""
+
+
+def _recipient_emails(item) -> tuple:
+    """(para, cc) como listas de endereços SMTP. Type: 1=Para, 2=Cc, 3=Cco."""
+    to, cc = [], []
+    try:
+        for r in item.Recipients:
+            addr = ""
+            try:
+                addr = (r.PropertyAccessor.GetProperty(PR_SMTP_ADDRESS) or "").lower()
+            except Exception:
+                pass
+            if not addr:
+                addr = _smtp_of(getattr(r, "AddressEntry", None))
+            if not addr:
+                continue
+            (to if r.Type == 1 else cc if r.Type == 2 else []).append(addr)
+    except Exception:
+        pass
+    return to, cc
 
 
 def _config() -> dict:
@@ -215,6 +274,7 @@ def _cycle(cfg: dict) -> str:
         subject = getattr(item, "Subject", "") or "(sem assunto)"
         sender = getattr(item, "SenderName", "") or getattr(item, "SenderEmailAddress", "") or "?"
         body = (getattr(item, "Body", "") or "")[:BODY_MAX]
+        to_emails, cc_emails = _recipient_emails(item)
         # Abre o email no Outlook clássico via protocolo próprio obsmail:<EntryID>.
         # Registre o protocolo no PC uma vez com scripts/install-outlook-link.bat
         # (usa a API COM do Outlook: GetItemFromID → abre o email exato).
@@ -225,6 +285,11 @@ def _cycle(cfg: dict) -> str:
                    "to": (getattr(item, "To", "") or "")[:500],
                    "cc": (getattr(item, "CC", "") or "")[:500],
                    "me": _me(),
+                   # Endereços SMTP: prioridade exata e lista "nunca gerar rascunho".
+                   "from_email": _sender_email(item),
+                   "to_emails": ";".join(to_emails),
+                   "cc_emails": ";".join(cc_emails),
+                   "me_email": _me_email(),
                    "web_link": web_link}
         print(f"  → {received:%Y-%m-%d %H:%M} [{sender}] {subject[:55]}")
         try:

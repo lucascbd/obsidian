@@ -936,7 +936,7 @@ def _inject_frontmatter_keys(vault: str, note_id: str, keys: dict) -> None:
 
 def ingest_email(subject: str, sender: str, date: str, body: str,
                  msg_id: str = "", web_link: str = "", vault: Optional[str] = None,
-                 db: str = None, to: str = "", cc: str = "", me: str = "") -> dict:
+                 db: str = None, to: str = "", cc: str = "", me: str = "", from_email: str = "", to_emails: str = "", cc_emails: str = "", me_email: str = "") -> dict:
     """Destila um email em nota do vault (conhecimento destilado + ponteiro p/ a fonte).
     Reaproveita o pipeline de ingestão (LLM distila → nota → auto-link → watcher indexa)."""
     # Enfileira para processamento assíncrono (resposta rápida; sem timeout de proxy).
@@ -944,30 +944,57 @@ def ingest_email(subject: str, sender: str, date: str, body: str,
         return {"queued": False, "skipped": True, "answer": "(email já processado)"}
     payload = {"subject": subject, "sender": sender, "date": date, "body": body,
                "msg_id": msg_id, "web_link": web_link, "vault": vault or db,
-               "to": to, "cc": cc, "me": me}
+               "to": to, "cc": cc, "me": me, "from_email": from_email,
+               "to_emails": to_emails, "cc_emails": cc_emails, "me_email": me_email}
     state.enqueue("outlook", msg_id, payload)
     if msg_id:
         state.mark_processed("outlook", msg_id, item_date=date, status="pending")
     return {"queued": True, "answer": "enfileirado"}
 
 
-def _email_priority(me: str, to: str, cc: str, subject: str, body: str) -> str:
-    """Prioridade determinística (sem LLM) a partir do papel do usuário no email.
-    - No campo Para (direto) → alta ; só em Cópia (CC) → media ; citado pelo nome → bump."""
-    me = (me or "").strip().lower()
-    to_l, cc_l = (to or "").lower(), (cc or "").lower()
-    if not me:
-        return "media"
+def _split_emails(s: str) -> set:
+    return {e.strip().lower() for e in re.split(r"[;,\s]+", s or "") if "@" in e}
+
+
+def _my_names(me: str) -> tuple:
+    """(como veio, primeiro nome, 'Nome Sobrenome') em minúsculas. Entende 'Sobrenome, Nome'."""
+    me = (me or "").strip()
+    if "," in me:
+        last, first = [x.strip() for x in me.split(",", 1)]
+        first = first.split()[0] if first else ""
+        return me.lower(), first.lower(), f"{first} {last}".strip().lower()
     first = me.split()[0] if me else ""
-    in_to = me in to_l or (first and first in to_l)
-    in_cc = me in cc_l or (first and first in cc_l)
-    # "central": único (ou primeiro) destinatário no Para
-    sole_to = in_to and to_l.strip().strip(";").count(";") == 0
-    mentioned = bool(first) and first in (f"{subject} {body}").lower()
-    if sole_to or in_to:
+    return me.lower(), first.lower(), me.lower()
+
+
+def _has_word(text: str, word: str) -> bool:
+    return bool(word) and re.search(rf"(?<!\w){re.escape(word)}(?!\w)", text) is not None
+
+
+def _email_priority(me: str, to: str, cc: str, subject: str, body: str,
+                    me_email: str = "", to_emails: str = "", cc_emails: str = "") -> str:
+    """Prioridade determinística (sem LLM) a partir do papel do usuário no email:
+    no Para → alta ; só em Cópia → media (alta se citado pelo nome) ; citado → media ;
+    nada disso (ex.: lista de distribuição) → baixa.
+    Com endereços SMTP (collector novo) a checagem de Para/Cc é exata; sem eles,
+    cai para o nome de exibição."""
+    raw, first, full = _my_names(me)
+    text = f"{subject} {body}".lower()
+    mentioned = _has_word(text, first)
+    me_email = (me_email or "").strip().lower()
+    if me_email and (to_emails or cc_emails):
+        in_to = me_email in _split_emails(to_emails)
+        in_cc = me_email in _split_emails(cc_emails)
+    else:
+        if not raw:
+            return "media"
+        to_l, cc_l = (to or "").lower(), (cc or "").lower()
+        in_to = (raw in to_l) or (full in to_l)
+        in_cc = (raw in cc_l) or (full in cc_l)
+    if in_to:
         return "alta"
     if in_cc:
-        return "media" if not mentioned else "alta"
+        return "alta" if mentioned else "media"
     if mentioned:
         return "media"
     return "baixa"
@@ -982,7 +1009,8 @@ _AUTOSUBJ_RE  = re.compile(r"(?i)(automatic reply|out of office|auto.?reply|resp
                            r"fora do escrit[oó]rio|aus[eê]ncia|on vacation|f[eé]rias)")
 
 
-def _should_autodraft(me: str, sender: str, to: str, cc: str, subject: str, body: str) -> bool:
+def _should_autodraft(me: str, sender: str, to: str, cc: str, subject: str, body: str,
+                      from_email: str = "", to_emails: str = "", cc_emails: str = "") -> bool:
     """Decide se vale gerar rascunho automático. A INGESTÃO não é afetada — só o draft.
     Suprime: no-reply/notificações, auto-replies, comunicados/broadcast, email de massa
     e qualquer remetente/destinatário na lista 'never_draft' do usuário."""
@@ -991,16 +1019,17 @@ def _should_autodraft(me: str, sender: str, to: str, cc: str, subject: str, body
         never = get_settings().get("never_draft", []) or []
     except Exception:
         never = []
-    hay = f"{sender} {to} {cc}".lower()
+    hay = f"{sender} {from_email} {to} {to_emails} {cc} {cc_emails}".lower()
     if any(p and p in hay for p in never):
         return False
-    s = sender or ""
+    s = f"{sender} {from_email}"
     if _NOREPLY_RE.search(s) or _BROADCAST_RE.search(s):
         return False
     if _AUTOSUBJ_RE.search(subject or ""):
         return False
     # Email de massa (comunicado/lista de distribuição): muitos destinatários visíveis.
-    n = len([x for x in re.split(r"[;,]", f"{to};{cc}") if x.strip()])
+    n = max(len([x for x in re.split(r"[;,]", f"{to};{cc}") if x.strip()]),
+            len(_split_emails(to_emails) | _split_emails(cc_emails)))
     if n >= 8:
         return False
     return True
@@ -1050,10 +1079,11 @@ def generate_reply_draft(vault: str, note_path: str, subject: str, reply_to: str
 
 def process_email_payload(subject: str = "", sender: str = "", date: str = "", body: str = "",
                           msg_id: str = "", web_link: str = "", vault: Optional[str] = None,
-                          db: str = None, to: str = "", cc: str = "", me: str = "") -> dict:
+                          db: str = None, to: str = "", cc: str = "", me: str = "", from_email: str = "", to_emails: str = "", cc_emails: str = "", me_email: str = "") -> dict:
     """Destila de fato um email (chamado pelo worker). Pode levantar LLMRateLimited."""
     db = db or vault
-    priority = _email_priority(me, to, cc, subject, body)
+    priority = _email_priority(me, to, cc, subject, body,
+                               me_email=me_email, to_emails=to_emails, cc_emails=cc_emails)
     raw = (
         f"Assunto: {subject}\n"
         f"De: {sender}\n"
@@ -1079,7 +1109,8 @@ def process_email_payload(subject: str = "", sender: str = "", date: str = "", b
                            source="outlook", ref=msg_id or path)
         # Auto-rascunho SÓ para prioridade alta E que pareça pedir resposta pessoal
         # (comunicados globais, no-reply, auto-replies e lista never_draft são poupados).
-        if priority == "alta" and _should_autodraft(me, sender, to, cc, subject, body):
+        if priority == "alta" and _should_autodraft(me, sender, to, cc, subject, body,
+                                                    from_email, to_emails, cc_emails):
             try:
                 generate_reply_draft(_vault(db), path, subject, sender, ref=msg_id,
                                      priority=priority, db=db)

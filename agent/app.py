@@ -1000,6 +1000,8 @@ def api_ingest_email():
         msg_id=data.get("msg_id", ""), web_link=data.get("web_link", ""),
         vault=data.get("vault") or None,
         to=data.get("to", ""), cc=data.get("cc", ""), me=data.get("me", ""),
+        from_email=data.get("from_email", ""), to_emails=data.get("to_emails", ""),
+        cc_emails=data.get("cc_emails", ""), me_email=data.get("me_email", ""),
     )
     return jsonify(res), 202
 
