@@ -140,6 +140,19 @@ HTML = """<!DOCTYPE html>
   .todo-restore:hover{filter:brightness(1.15)}
   .hist-btn{border:1px solid var(--border);background:var(--surface2);color:var(--muted);border-radius:8px;cursor:pointer;font-size:13px;padding:3px 8px;line-height:1}
   .hist-btn:hover,.hist-btn.on{border-color:var(--accent);color:var(--text)}
+  .prio-chip{border:1px solid var(--border);background:transparent;color:var(--muted);border-radius:20px;font:inherit;font-size:10px;padding:1px 8px;cursor:pointer;margin-right:2px}
+  .prio-chip:hover{border-color:var(--accent);color:var(--text)}
+  .prio-chip.p-alta{background:rgba(239,68,68,.15);border-color:var(--red);color:var(--red)}
+  .prio-chip.p-media{background:rgba(245,158,11,.15);border-color:var(--amber);color:var(--amber)}
+  .prio-chip.p-baixa{background:var(--surface2);color:var(--label)}
+  .due{color:var(--amber)} .due.late{color:var(--red);font-weight:600}
+  .mini-select{background:var(--surface2);border:1px solid var(--border);color:var(--label);border-radius:8px;font:inherit;font-size:11px;padding:3px 6px;cursor:pointer}
+  .mail .c-top{align-items:center}
+  .mail-from{font-weight:600;color:var(--label);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .mail .c-actions{align-items:center;flex-wrap:wrap}
+  .mail .sp{flex:1}
+  .mail-st{font-size:12px;color:var(--label)} .mail-st.err{color:var(--amber)}
+  .lnk{background:none;border:none;color:var(--accent);font:inherit;font-size:11px;cursor:pointer;text-decoration:underline;padding:0}
   .hist-bar{font-size:11px;color:var(--muted);padding:2px 2px 8px;border-bottom:1px solid var(--border);margin-bottom:8px}
   .prio-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;margin-top:5px}
   .c-draft{width:100%;box-sizing:border-box;resize:vertical;font-family:inherit;font-size:12px;line-height:1.5;color:var(--text);background:var(--surface);border:1px solid var(--border);border-radius:7px;padding:7px 8px}
@@ -211,7 +224,7 @@ HTML = """<!DOCTYPE html>
     <section class="tile">
       <div class="tile-head"><div class="tile-ico email">📧</div><h2>Email</h2><span class="tile-count" id="email-count">0</span></div>
       <div class="tile-body" id="email-body">
-        <div class="tile-empty"><div class="big">📧</div>Rascunhos que o agente preparar a partir dos seus emails aparecem aqui, prontos para você revisar e liberar o envio.<br><span class="soon">Microsoft Graph — em breve</span></div>
+        <div class="tile-empty"><div class="big">📧</div>Os emails processados aparecem aqui. Em cada um você pode gerar um rascunho de resposta.</div>
       </div>
     </section>
 
@@ -223,9 +236,9 @@ HTML = """<!DOCTYPE html>
     </section>
 
     <section class="tile">
-      <div class="tile-head"><div class="tile-ico todo">✅</div><h2>To-dos</h2><span class="tile-count" id="todo-count">0</span><button class="hist-btn" id="todo-hist-btn" onclick="toggleTodoHistory()" title="Histórico de concluídas">🕑</button></div>
+      <div class="tile-head"><div class="tile-ico todo">✅</div><h2>To-dos</h2><span class="tile-count" id="todo-count">0</span><select class="mini-select" id="todo-sort" onchange="setTodoSort(this.value)" title="Ordenar"><option value="created">Inclusão</option><option value="due">Prazo</option><option value="priority">Prioridade</option></select><button class="hist-btn" id="todo-hist-btn" onclick="toggleTodoHistory()" title="Histórico de concluídas">🕑</button></div>
       <div class="tile-body" id="todo-body">
-        <div class="tile-empty"><div class="big">✅</div>Tarefas que o agente extrair dos seus emails e conversas aparecem aqui como uma lista de afazeres.<br><span class="soon">Microsoft Graph — em breve</span></div>
+        <div class="tile-empty"><div class="big">✅</div>Tarefas extraídas dos seus emails aparecem aqui.</div>
       </div>
     </section>
   </main>
@@ -268,9 +281,9 @@ HTML = """<!DOCTYPE html>
         </div>
 
         <div class="field">
-          <label>Nunca gerar rascunho (um por linha)</label>
+          <label>Comunicados e notificações (um por linha)</label>
           <textarea id="set-neverdraft" rows="4" placeholder="remetente, destinatário ou domínio, ex:&#10;comunicação interna&#10;internal communications&#10;@newsletter.haleon.com"></textarea>
-          <div class="hint">Estes <b>continuam virando nota</b> (você pode me pedir resumo), mas <b>nunca</b> geram rascunho de resposta automático. Use para comunicados globais, listas de distribuição, etc. No-reply, auto-replies e emails de massa já são poupados automaticamente.</div>
+          <div class="hint">Remetentes, listas ou domínios que só informam (comunicados globais, notificações). Os emails deles <b>continuam virando nota</b>, mas não ganham o to-do automático <b>"Responder"</b>. Rascunhos agora são sempre pedidos por você no tile Email.</div>
         </div>
       </div>
       <div class="tab-pane" data-pane="manutencao">
@@ -488,9 +501,7 @@ HTML = """<!DOCTYPE html>
   function reorgSim(){ _reorg(false); }
   function reorgApply(){ if(confirm('Aplicar a organização? Isso move as notas e reescreve os wiki links. Recomendo simular antes.')) _reorg(true); }
 
-  // ── To-dos (tile) ──
-  var todoHistory=false;
-  var PC={alta:'var(--red)',media:'var(--amber)',baixa:'var(--muted)'};
+  // ── Utilidades ──
   function escapeHtml(s){var d=document.createElement('div');d.textContent=s||'';return d.innerHTML;}
   // Abre o email: protocolo próprio (obsmail:/outlook:) é entregue ao handler do
   // Windows via window.location (gesto do usuário, sem abrir aba); http abre em nova aba.
@@ -498,30 +509,51 @@ HTML = """<!DOCTYPE html>
     if(/^https?:/i.test(url)){window.open(url,'_blank','noopener');return;}
     window.location.href=url;
   }
+  // "2026-11-27 10:14:58" → "27/11" (ou "27/11 10:14" com hora)
+  function fmtD(s,withTime){
+    if(!s)return '';var p=String(s).slice(0,10).split('-');if(p.length<3)return s;
+    var out=p[2]+'/'+p[1];if(withTime&&String(s).length>=16)out+=' '+String(s).slice(11,16);return out;
+  }
+  function todayIso(){var d=new Date();return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
+  function mailLinkHtml(url){return url?('<a class="todo-link" href="'+escapeHtml(url)+'" onclick="openMailLink(this.href);return false;" title="Abrir no Outlook">📧 abrir</a>'):'';}
+
+  // ── To-dos (tile) ──
+  var todoHistory=false;
+  var PRIO={alta:{t:'Alta',c:'p-alta'},media:{t:'Média',c:'p-media'},baixa:{t:'Baixa',c:'p-baixa'}};
+  var NEXTP={'':'alta',alta:'media',media:'baixa',baixa:''};
+  function todoSort(){try{return localStorage.getItem('todoSort')||'created';}catch(e){return 'created';}}
+  function setTodoSort(v){try{localStorage.setItem('todoSort',v);}catch(e){}loadTodos();}
+  function setChip(btn,p){btn.dataset.p=p||'';btn.className='prio-chip '+(PRIO[p]?PRIO[p].c:'p-none');btn.textContent=PRIO[p]?PRIO[p].t:'+ prioridade';btn.title='Clique para mudar a prioridade';}
+  async function cyclePrio(btn,id){
+    var nx=NEXTP[btn.dataset.p||''];setChip(btn,nx);
+    try{await fetch('/api/todos/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({priority:nx})});}catch(e){}
+    if(todoSort()==='priority'){loadTodos();}
+  }
   function toggleTodoHistory(){
     todoHistory=!todoHistory;
     var b=document.getElementById('todo-hist-btn');if(b)b.classList.toggle('on',todoHistory);
+    var s=document.getElementById('todo-sort');if(s)s.style.display=todoHistory?'none':'';
     loadTodos();
   }
   async function loadTodos(){
     if(todoHistory){return loadTodoHistory();}
     try{
-      var r=await fetch('/api/todos?status=open&vault='+encodeURIComponent(getRoot()));var d=await r.json();
+      var sort=todoSort();var sel=document.getElementById('todo-sort');if(sel)sel.value=sort;
+      var r=await fetch('/api/todos?status=open&sort='+sort+'&vault='+encodeURIComponent(getRoot()));var d=await r.json();
       var body=document.getElementById('todo-body');var cnt=document.getElementById('todo-count');
       var todos=d.todos||[];cnt.textContent=todos.length;
       if(!todos.length){body.innerHTML='<div class="tile-empty"><div class="big">✅</div>Nenhuma tarefa aberta. Tarefas extraídas dos seus emails aparecem aqui.</div>';return;}
-      body.innerHTML='';
+      body.innerHTML='';var today=todayIso();
       todos.forEach(function(t){
         var div=document.createElement('div');div.className='todo-item';div.id='todo'+t.id;
-        var due=t.due?(' · <span style="color:var(--amber)">'+t.due+'</span>'):'';
-        var prio=t.priority||'media';
-        var dot='<span class="prio-dot" title="'+prio+'" style="background:'+(PC[prio]||PC.media)+'"></span>';
-        var link=t.link?('<a class="todo-link" href="'+escapeHtml(t.link)+'" onclick="openMailLink(this.href);return false;" title="Abrir no Outlook">📧 abrir</a>'):'';
+        var due='';
+        if(t.due){due=' · <span class="due'+(t.due<today?' late':'')+'">prazo '+fmtD(t.due)+'</span>';}
         div.innerHTML=
           '<button class="todo-check" onclick="doneTodo('+t.id+',this)" title="Concluir">✓</button>'+
-          dot+
           '<div class="todo-main"><div class="todo-title">'+escapeHtml(t.title)+'</div>'+
-          '<div class="todo-meta">'+prio+' · '+(t.source||'')+due+' '+link+'</div></div>';
+          '<div class="todo-meta"><button class="prio-chip" onclick="cyclePrio(this,'+t.id+')"></button>'+
+          ' incluído '+fmtD(t.created_at)+due+' '+mailLinkHtml(t.link)+'</div></div>';
+        setChip(div.querySelector('.prio-chip'),t.priority||'');
         body.appendChild(div);
       });
     }catch(e){}
@@ -535,13 +567,9 @@ HTML = """<!DOCTYPE html>
       if(!todos.length){body.innerHTML+='<div class="tile-empty"><div class="big">🕑</div>Nenhuma tarefa concluída ainda.</div>';return;}
       todos.forEach(function(t){
         var div=document.createElement('div');div.className='todo-item done';div.id='todo'+t.id;
-        var prio=t.priority||'media';
-        var dot='<span class="prio-dot" title="'+prio+'" style="background:'+(PC[prio]||PC.media)+'"></span>';
-        var when=t.done_at?(' · '+t.done_at.slice(0,10)):'';
         div.innerHTML=
-          dot+
           '<div class="todo-main"><div class="todo-title">'+escapeHtml(t.title)+'</div>'+
-          '<div class="todo-meta">concluída'+when+'</div></div>'+
+          '<div class="todo-meta">incluído '+fmtD(t.created_at)+' · concluído '+fmtD(t.done_at)+'</div></div>'+
           '<button class="todo-restore" onclick="restoreTodo('+t.id+')" title="Restaurar">↩︎</button>';
         body.appendChild(div);
       });
@@ -560,29 +588,59 @@ HTML = """<!DOCTYPE html>
     }catch(e){}
   }
 
-  // ── Email (tile de rascunhos de resposta) ──
-  async function loadDrafts(){
+  // ── Email (tile): lista de emails + rascunho sob demanda ──
+  var _draftEdits={};var _emailFast=null;
+  function emailBusy(list){return list.some(function(e){return e.draft_status==='waiting'||e.draft_status==='generating';});}
+  function scheduleEmails(list){
+    if(_emailFast){clearTimeout(_emailFast);_emailFast=null;}
+    if(emailBusy(list)){_emailFast=setTimeout(loadEmails,3000);}   // atualiza rápido enquanto gera
+  }
+  async function loadEmails(){
     try{
-      var r=await fetch('/api/drafts?vault='+encodeURIComponent(getRoot()));var d=await r.json();
-      var body=document.getElementById('email-body');var cnt=document.getElementById('email-count');
-      var drafts=d.drafts||[];cnt.textContent=drafts.length;
-      if(!drafts.length){body.innerHTML='<div class="tile-empty"><div class="big">📧</div>Rascunhos de resposta para emails prioritários aparecem aqui, prontos para revisar e copiar.</div>';return;}
+      var r=await fetch('/api/emails?vault='+encodeURIComponent(getRoot()));var d=await r.json();
+      var list=d.emails||[];
+      document.getElementById('email-count').textContent=list.length;
+      var a=document.activeElement;
+      if(a&&a.classList&&a.classList.contains('c-draft')){scheduleEmails(list);return;}  // não atrapalha quem está editando
+      var body=document.getElementById('email-body');
+      if(!list.length){body.innerHTML='<div class="tile-empty"><div class="big">📧</div>Os emails processados aparecem aqui. Em cada um você pode gerar um rascunho de resposta.</div>';scheduleEmails(list);return;}
       body.innerHTML='';
-      var pc={alta:'var(--red)',media:'var(--amber)',baixa:'var(--muted)'};
-      drafts.forEach(function(t){
-        var card=document.createElement('div');card.className='card';
-        var dot='<span class="prio-dot" title="'+(t.priority||'media')+'" style="background:'+(pc[t.priority]||pc.media)+'"></span>';
-        card.innerHTML=
-          '<div class="c-top">'+dot+'<span>Para: '+escapeHtml(t.reply_to||'?')+'</span></div>'+
-          '<div class="c-title">'+escapeHtml(t.subject||'(sem assunto)')+'</div>'+
-          '<textarea class="c-draft" id="dft'+t.id+'" rows="6">'+escapeHtml(t.body||'')+'</textarea>'+
-          '<div class="c-actions">'+
-            '<button class="c-btn ok" onclick="copyDraft('+t.id+',this)">📋 Copiar</button>'+
-            '<button class="c-btn" onclick="dismissDraft('+t.id+')">Descartar</button>'+
-          '</div>';
-        body.appendChild(card);
-      });
-    }catch(e){}
+      list.forEach(function(e){body.appendChild(emailCard(e));});
+      scheduleEmails(list);
+    }catch(err){}
+  }
+  function emailCard(e){
+    var c=document.createElement('div');c.className='card mail';c.dataset.id=e.msg_id;
+    var st=e.draft_status||'';var link=mailLinkHtml(e.web_link);
+    var html='<div class="c-top"><span class="mail-from">'+escapeHtml(e.sender||'?')+'</span><span>'+fmtD(e.email_date,true)+'</span></div>'+
+             '<div class="c-title">'+escapeHtml(e.subject||'(sem assunto)')+'</div>';
+    if(e.draft_id){
+      var val=(_draftEdits[e.draft_id]!==undefined)?_draftEdits[e.draft_id]:(e.draft_body||'');
+      html+='<textarea class="c-draft" id="dft'+e.draft_id+'" rows="7" oninput="_draftEdits['+e.draft_id+']=this.value">'+escapeHtml(val)+'</textarea>'+
+            '<div class="c-actions">'+link+'<span class="sp"></span>'+
+            '<button class="c-btn ok" onclick="copyDraft('+e.draft_id+',this)">📋 Copiar</button>'+
+            '<button class="c-btn" onclick="emailDraft(this,false)">🔄 Refazer</button>'+
+            '<button class="c-btn" onclick="emailDiscard(this,'+e.draft_id+')">Descartar</button></div>';
+    }else if(st==='waiting'){
+      html+='<div class="mail-st">⏳ Buscando o email completo no Outlook do seu PC… <button class="lnk" onclick="emailDraft(this,true)">gerar só pela nota</button></div>'+
+            '<div class="c-actions">'+link+'</div>';
+    }else if(st==='generating'){
+      html+='<div class="mail-st">✍️ Escrevendo o rascunho…</div><div class="c-actions">'+link+'</div>';
+    }else{
+      if(st==='error'){html+='<div class="mail-st err">⚠️ '+escapeHtml(e.draft_error||'erro')+' <button class="lnk" onclick="emailDraft(this,true)">gerar pela nota</button></div>';}
+      html+='<div class="c-actions">'+link+'<span class="sp"></span><button class="c-btn ok" onclick="emailDraft(this,false)">✍️ '+(st==='error'?'Tentar de novo':'Gerar rascunho')+'</button></div>';
+    }
+    c.innerHTML=html;return c;
+  }
+  async function emailDraft(btn,fromNote){
+    var id=btn.closest('.mail').dataset.id;btn.disabled=true;
+    try{await fetch('/api/emails/draft',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vault:getRoot(),msg_id:id,from_note:!!fromNote})});}catch(e){}
+    loadEmails();
+  }
+  async function emailDiscard(btn,draftId){
+    var id=btn.closest('.mail').dataset.id;delete _draftEdits[draftId];
+    try{await fetch('/api/emails/discard',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vault:getRoot(),msg_id:id})});}catch(e){}
+    loadEmails();
   }
   function copyDraft(id,btn){
     var ta=document.getElementById('dft'+id);if(!ta)return;
@@ -590,14 +648,11 @@ HTML = """<!DOCTYPE html>
     try{navigator.clipboard.writeText(ta.value);}catch(e){document.execCommand('copy');}
     var o=btn.textContent;btn.textContent='✅ Copiado';setTimeout(function(){btn.textContent=o;},1500);
   }
-  async function dismissDraft(id){
-    try{await fetch('/api/drafts/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:'dismissed'})});loadDrafts();}catch(e){}
-  }
 
   document.addEventListener('keydown',function(e){if(e.key==='Escape'){closeSettings();}});
   loadVault();
-  loadTodos(); loadDrafts();
-  setInterval(function(){loadTodos();loadDrafts();}, 15000);  // refresh "live" a cada 15s
+  loadTodos(); loadEmails();
+  setInterval(function(){loadTodos();loadEmails();}, 15000);  // refresh "live" a cada 15s
 </script>
 </body>
 </html>
@@ -1113,16 +1168,72 @@ def api_todos():
         tid = state.add_todo(v, data.get("title", ""), due=data.get("due", ""), source="manual")
         return jsonify({"id": tid})
     status = request.args.get("status")  # open|done|None(todos)
-    return jsonify({"todos": state.list_todos(v, status=status), "open": state.count_todos(v, "open")})
+    sort = request.args.get("sort", "created")  # created|due|priority
+    return jsonify({"todos": state.list_todos(v, status=status, sort=sort),
+                    "open": state.count_todos(v, "open")})
 
 
 @app.route("/api/todos/<int:todo_id>", methods=["POST"])
 def api_todo_update(todo_id):
     from core import state
     data = request.get_json(silent=True) or {}
-    status = data.get("status", "done")
-    state.set_todo_status(todo_id, "done" if status == "done" else "open")
+    if "priority" in data:                 # prioridade é definida pelo usuário na tela
+        state.set_todo_priority(todo_id, data.get("priority") or "")
+    if "status" in data or "priority" not in data:
+        status = data.get("status", "done")
+        state.set_todo_status(todo_id, "done" if status == "done" else "open")
     return jsonify({"ok": True})
+
+
+@app.route("/api/emails", methods=["GET"])
+def api_emails():
+    """Lista do tile Email (metadados + rascunho, se houver)."""
+    from core import state
+    from agent import _vault as _resolve_vault
+    v = _resolve_vault(request.args.get("vault") or None)
+    limit = min(int(request.args.get("limit", 60) or 60), 200)
+    return jsonify({"emails": state.list_emails(v, limit=limit)})
+
+
+@app.route("/api/emails/draft", methods=["POST"])
+def api_email_draft():
+    """Pede o rascunho de um email. from_note=true gera só com a nota (PC desligado)."""
+    from agent import request_email_draft
+    data = request.get_json(silent=True) or {}
+    return jsonify(request_email_draft(data.get("vault") or None, data.get("msg_id", ""),
+                                       from_note=bool(data.get("from_note"))))
+
+
+@app.route("/api/emails/discard", methods=["POST"])
+def api_email_discard():
+    from core import state
+    from agent import _vault as _resolve_vault
+    data = request.get_json(silent=True) or {}
+    state.discard_email_drafts(_resolve_vault(data.get("vault") or None), data.get("msg_id", ""))
+    return jsonify({"ok": True})
+
+
+@app.route("/api/email-requests", methods=["GET"])
+def api_email_requests():
+    """(collector) Emails cujo rascunho foi pedido e que ele deve buscar no Outlook."""
+    ok, err = _machine_auth()
+    if not ok:
+        return err
+    from core import state
+    return jsonify({"requests": state.pending_email_requests()})
+
+
+@app.route("/api/email-body", methods=["POST"])
+def api_email_body():
+    """(collector) Entrega o email completo pedido. O corpo NÃO é gravado: só vai ao LLM."""
+    ok, err = _machine_auth()
+    if not ok:
+        return err
+    from agent import receive_email_body
+    data = request.get_json(silent=True) or {}
+    return jsonify(receive_email_body(data.get("vault") or None, data.get("msg_id", ""),
+                                      found=bool(data.get("found")), full_email=data.get("full_email", ""),
+                                      error=data.get("error", "")))
 
 
 @app.route("/api/drafts", methods=["GET"])
@@ -1245,16 +1356,10 @@ def _warn_failed_item(src: str, p: dict, err) -> None:
         v = _agent_mod._vault(p.get("vault") or None)
         subject = p.get("subject") or "(sem assunto)"
         sender = p.get("sender") or p.get("organizer") or ""
-        prio = "media"
-        if src != "calendar":
-            prio = _agent_mod._email_priority(
-                p.get("me", ""), p.get("to", ""), p.get("cc", ""), subject, p.get("body", ""),
-                me_email=p.get("me_email", ""), to_emails=p.get("to_emails", ""),
-                cc_emails=p.get("cc_emails", ""))
         what = "Reunião" if src == "calendar" else "Email"
         title = f"⚠️ {what} não processado — abrir e tratar: {subject}" + (f" ({sender})" if sender else "")
         state.add_todo(v, title[:300], source=src, ref=p.get("msg_id") or p.get("event_id") or "",
-                       priority=prio, link=p.get("web_link", ""))
+                       link=p.get("web_link", ""))
         state.record_event(v, actor="agent", kind="ingest_failed",
                            summary=f"{what} não processado: {subject}"[:200], source=src,
                            detail=str(err)[:1000])
@@ -1268,8 +1373,19 @@ def _start_worker():
     log.info("[ingest-worker] iniciado")
 
 
+def _start_backfill():
+    def _run():
+        try:
+            for v in get_vaults():
+                _agent_mod.backfill_emails(v)
+        except Exception as e:
+            log.warning(f"[emails] backfill: {e}")
+    threading.Thread(target=_run, daemon=True, name="emails-backfill").start()
+
+
 _start_scheduler()
 _start_worker()
+_start_backfill()
 
 
 if __name__ == "__main__":

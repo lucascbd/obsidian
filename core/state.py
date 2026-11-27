@@ -109,6 +109,23 @@ def init_db() -> None:
                 created_at TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_drafts_status ON drafts (vault, status);
+            CREATE TABLE IF NOT EXISTS emails (
+                vault         TEXT NOT NULL,
+                msg_id        TEXT NOT NULL,   -- InternetMessageID (ou EntryID)
+                entry_id      TEXT,            -- EntryID do Outlook (o collector abre por ele)
+                subject       TEXT,
+                sender        TEXT,
+                from_email    TEXT,
+                email_date    TEXT,
+                note_path     TEXT,
+                web_link      TEXT,
+                draft_status  TEXT DEFAULT '', -- '' | waiting | generating | ready | error
+                draft_error   TEXT,
+                draft_requested_at TEXT,
+                created_at    TEXT,
+                PRIMARY KEY (vault, msg_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_emails_date ON emails (vault, email_date);
             CREATE TABLE IF NOT EXISTS kv (
                 vault TEXT NOT NULL,
                 key   TEXT NOT NULL,
@@ -138,6 +155,11 @@ def init_db() -> None:
             c.execute("ALTER TABLE drafts ADD COLUMN from_email TEXT")
         except Exception:
             pass
+        # Uma vez: as prioridades dos to-dos eram automáticas; agora quem define é o
+        # usuário, na tela. Zera as antigas.
+        if not c.execute("SELECT 1 FROM kv WHERE vault='*' AND key='todo_priority_reset_v1'").fetchone():
+            c.execute("UPDATE todos SET priority=''")
+            c.execute("INSERT INTO kv (vault, key, value) VALUES ('*','todo_priority_reset_v1','1')")
 
 
 # ── Registro de itens processados (dedup entre email/Teams) ──────────────────────
@@ -205,13 +227,13 @@ def queue_len() -> int:
 # ── To-dos (extraídos de emails/reuniões + manuais) ─────────────────────────────
 
 def add_todo(vault: str, title: str, due: str = "", source: str = "", ref: str = "",
-             note_path: str = "", priority: str = "media", link: str = "") -> int:
+             note_path: str = "", priority: str = "", link: str = "") -> int:
     import time
     title = (title or "").strip()
     if not title:
         return 0
     if priority not in ("alta", "media", "baixa"):
-        priority = "media"
+        priority = ""          # sem prioridade: quem define é o usuário, na tela
     now_iso = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
     with _lock, _conn() as c:
         # evita duplicar o mesmo título vindo da mesma origem
@@ -228,20 +250,39 @@ def add_todo(vault: str, title: str, due: str = "", source: str = "", ref: str =
         return cur.lastrowid
 
 
-def list_todos(vault: str, status: str = None, limit: int = 200) -> list:
+TODO_SORTS = {
+    # data de inclusão: mais recentes primeiro
+    "created":  "created_at DESC, id DESC",
+    # prazo: mais próximo primeiro; sem prazo no fim
+    "due":      "(COALESCE(due,'')='') ASC, due ASC, created_at DESC",
+    # prioridade: alta → média → baixa → sem prioridade; depois prazo e inclusão
+    "priority": ("CASE priority WHEN 'alta' THEN 0 WHEN 'media' THEN 1 WHEN 'baixa' THEN 2 ELSE 3 END, "
+                 "(COALESCE(due,'')='') ASC, due ASC, created_at DESC"),
+}
+
+
+def list_todos(vault: str, status: str = None, limit: int = 200, sort: str = "created") -> list:
     q = ("SELECT id, title, due, status, source, ref, note_path, priority, link, created_at, done_at "
          "FROM todos WHERE vault=?")
     params = [vault]
     if status:
         q += " AND status=?"
         params.append(status)
-    # alta → media → baixa; depois por prazo e recência
-    q += (" ORDER BY CASE priority WHEN 'alta' THEN 0 WHEN 'media' THEN 1 ELSE 2 END, "
-          "(due='') ASC, due ASC, id DESC LIMIT ?")
+    order = TODO_SORTS.get(sort, TODO_SORTS["created"])
+    if status == "done" and sort == "created":
+        order = "done_at DESC, id DESC"
+    q += f" ORDER BY {order} LIMIT ?"
     params.append(limit)
     with _conn() as c:
         rows = c.execute(q, params).fetchall()
     return [dict(r) for r in rows]
+
+
+def set_todo_priority(todo_id: int, priority: str) -> None:
+    if priority not in ("alta", "media", "baixa"):
+        priority = ""
+    with _lock, _conn() as c:
+        c.execute("UPDATE todos SET priority=? WHERE id=?", (priority, todo_id))
 
 
 def set_todo_status(todo_id: int, status: str) -> None:
@@ -375,6 +416,77 @@ def record_event(vault: str, actor: str, kind: str, summary: str,
             )
     except Exception:
         pass  # log de atividade nunca deve derrubar uma ação
+
+
+# ── Emails (lista do tile Email; o CORPO nunca é gravado) ─────────────────────────
+
+def upsert_email(vault: str, msg_id: str, subject: str = "", sender: str = "", from_email: str = "",
+                 email_date: str = "", note_path: str = "", web_link: str = "") -> None:
+    import time
+    if not msg_id:
+        return
+    wl = web_link or ""
+    entry_id = wl.split(":", 1)[1] if wl.startswith(("obsmail:", "outlook:")) else ""
+    now_iso = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    with _lock, _conn() as c:
+        c.execute(
+            "INSERT INTO emails (vault, msg_id, entry_id, subject, sender, from_email, email_date, "
+            "note_path, web_link, created_at) VALUES (?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(vault, msg_id) DO UPDATE SET subject=excluded.subject, sender=excluded.sender, "
+            "from_email=COALESCE(NULLIF(excluded.from_email,''), emails.from_email), "
+            "email_date=excluded.email_date, note_path=COALESCE(NULLIF(excluded.note_path,''), emails.note_path), "
+            "web_link=COALESCE(NULLIF(excluded.web_link,''), emails.web_link), "
+            "entry_id=COALESCE(NULLIF(excluded.entry_id,''), emails.entry_id)",
+            (vault, msg_id, entry_id, (subject or "")[:300], (sender or "")[:200], (from_email or "").lower(),
+             email_date or "", note_path or "", web_link or "", now_iso))
+
+
+def get_email(vault: str, msg_id: str) -> dict:
+    with _conn() as c:
+        r = c.execute("SELECT * FROM emails WHERE vault=? AND msg_id=?", (vault, msg_id)).fetchone()
+    return dict(r) if r else {}
+
+
+def list_emails(vault: str, limit: int = 60) -> list:
+    """Emails mais recentes, com o rascunho (se houver) já anexado."""
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT e.*, d.id AS draft_id, d.body AS draft_body, d.subject AS draft_subject "
+            "FROM emails e LEFT JOIN drafts d ON d.id = ("
+            "  SELECT id FROM drafts WHERE vault=e.vault AND ref=e.msg_id AND status='pending' "
+            "  ORDER BY id DESC LIMIT 1) "
+            "WHERE e.vault=? ORDER BY e.email_date DESC, e.created_at DESC LIMIT ?",
+            (vault, limit)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def set_email_draft_status(vault: str, msg_id: str, status: str, error: str = "") -> None:
+    import time
+    now_iso = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    with _lock, _conn() as c:
+        if status == "waiting":
+            c.execute("UPDATE emails SET draft_status=?, draft_error='', draft_requested_at=? "
+                      "WHERE vault=? AND msg_id=?", (status, now_iso, vault, msg_id))
+        else:
+            c.execute("UPDATE emails SET draft_status=?, draft_error=? WHERE vault=? AND msg_id=?",
+                      (status, error or "", vault, msg_id))
+
+
+def pending_email_requests(limit: int = 10) -> list:
+    """Pedidos de rascunho esperando o collector trazer o corpo do email do Outlook."""
+    with _conn() as c:
+        rows = c.execute("SELECT vault, msg_id, entry_id, subject FROM emails "
+                         "WHERE draft_status='waiting' ORDER BY draft_requested_at LIMIT ?",
+                         (limit,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def discard_email_drafts(vault: str, msg_id: str) -> None:
+    with _lock, _conn() as c:
+        c.execute("UPDATE drafts SET status='dismissed' WHERE vault=? AND ref=? AND status='pending'",
+                  (vault, msg_id))
+        c.execute("UPDATE emails SET draft_status='', draft_error='' WHERE vault=? AND msg_id=?",
+                  (vault, msg_id))
 
 
 def last_event_ts(vault: str, kinds: tuple) -> float:

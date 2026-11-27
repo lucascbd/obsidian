@@ -219,6 +219,77 @@ def _send(payload: dict) -> str:
     return "error"
 
 
+# ── Rascunho sob demanda: o painel pede, o collector busca o email no Outlook ──
+REQUEST_POLL = int(os.environ.get("REQUEST_POLL", "10"))
+PR_INTERNET_MESSAGE_ID = "http://schemas.microsoft.com/mapi/proptag/0x1035001F"
+FULL_EMAIL_MAX = 60000
+
+
+def _find_mail(entry_id: str, msg_id: str):
+    """Acha o email pelo EntryID; se ele mudou de pasta, procura pelo Message-ID na
+    Caixa de Entrada e nos Itens Enviados."""
+    outlook = win32com.client.Dispatch("Outlook.Application")
+    ns = outlook.GetNamespace("MAPI")
+    if entry_id:
+        try:
+            return ns.GetItemFromID(entry_id)
+        except Exception:
+            pass
+    if msg_id and "'" not in msg_id:
+        for fid in (OL_INBOX, 5):   # 5 = Itens Enviados
+            try:
+                items = ns.GetDefaultFolder(fid).Items.Restrict(
+                    f'@SQL="{PR_INTERNET_MESSAGE_ID}" = \'{msg_id}\'')
+                if items.Count:
+                    return items.Item(1)
+            except Exception:
+                pass
+    return None
+
+
+def _full_email_text(item) -> str:
+    """Cabeçalho + corpo completo (inclui o histórico da conversa citado no corpo)."""
+    try:
+        rt = item.ReceivedTime
+        when = f"{rt.year}-{rt.month:02d}-{rt.day:02d} {rt.hour:02d}:{rt.minute:02d}"
+    except Exception:
+        when = ""
+    head = (f"De: {getattr(item, 'SenderName', '')} <{_sender_email(item)}>\n"
+            f"Para: {getattr(item, 'To', '')}\n"
+            f"Cc: {getattr(item, 'CC', '')}\n"
+            f"Data: {when}\n"
+            f"Assunto: {getattr(item, 'Subject', '')}\n\n")
+    return (head + (getattr(item, "Body", "") or ""))[:FULL_EMAIL_MAX]
+
+
+def _serve_draft_requests() -> None:
+    try:
+        r = requests.get(f"{AGENT_URL}/api/email-requests", headers=HEADERS, timeout=15,
+                         allow_redirects=False)
+        if r.status_code != 200:
+            return
+        reqs = r.json().get("requests", [])
+    except Exception:
+        return
+    for q in reqs:
+        print(f"  ✍️ pedido de rascunho: {q.get('subject', '')[:60]}")
+        payload = {"vault": q.get("vault"), "msg_id": q.get("msg_id")}
+        try:
+            item = _find_mail(q.get("entry_id", ""), q.get("msg_id", ""))
+            if item is None:
+                payload.update(found=False, error="o email não foi encontrado no Outlook (movido ou apagado?)")
+            else:
+                payload.update(found=True, full_email=_full_email_text(item))
+        except Exception as e:
+            payload.update(found=False, error=f"erro ao abrir o email no Outlook: {e}"[:300])
+        try:
+            requests.post(f"{AGENT_URL}/api/email-body", json=payload, headers=HEADERS, timeout=60,
+                          allow_redirects=False)
+            print("    ✅ email enviado ao agente" if payload.get("found") else f"    ⚠ {payload.get('error')}")
+        except Exception as e:
+            print("    ❌ falha de rede ao enviar o email:", e)
+
+
 def _cycle(cfg: dict) -> str:
     window = datetime.datetime.now() - datetime.timedelta(days=cfg["backfill"])
     done, ok = _processed_ids(window.strftime("%Y-%m-%d"))
@@ -408,7 +479,12 @@ def main():
             _cycle_calendar(cfg)
         except Exception as e:
             print("  ⚠ erro no ciclo:", e)
-        time.sleep(RATELIMIT_PAUSE if result == "ratelimit" else cfg["poll"])
+        # Espera o próximo ciclo atendendo, a cada REQUEST_POLL s, os pedidos de
+        # rascunho feitos no painel (o agente não consegue chamar este PC).
+        wait_until = time.time() + (RATELIMIT_PAUSE if result == "ratelimit" else cfg["poll"])
+        while time.time() < wait_until:
+            _serve_draft_requests()
+            time.sleep(max(1, min(REQUEST_POLL, wait_until - time.time())))
 
 
 if __name__ == "__main__":

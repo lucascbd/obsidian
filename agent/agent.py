@@ -1092,59 +1092,28 @@ DRAFT_SYSTEM = (
     "Você redige um RASCUNHO de resposta de email em nome do usuário (o Mordomo do "
     "Conhecimento). Escreva NA MESMA LÍNGUA do email original (inglês→inglês, "
     "português→pt-BR, espanhol→espanhol); não traduza. Tom profissional e objetivo, pronto "
-    "para o usuário revisar e enviar. Use o resumo do email e o contexto do vault quando ajudar; "
+    "para o usuário revisar e enviar. Baseie-se no email completo (quando fornecido), na nota "
+    "destilada e no contexto do vault; "
     "NÃO invente fatos. Se faltar informação para responder, deixe um marcador claro como "
     "[confirmar X]. Responda SOMENTE com o corpo do email (sem assunto, sem JSON)."
 )
 
 
-def generate_reply_draft(vault: str, note_path: str, subject: str, reply_to: str,
-                         ref: str = "", priority: str = "media", db: str = None,
-                         from_email: str = "") -> dict:
-    """Gera um rascunho de resposta a partir da nota destilada + contexto do vault.
-    Pode levantar LLMRateLimited (chamada única ao LLM)."""
-    v = _vault(db or vault)
-    try:
-        note = tool_read_note(note_path, db=v) if note_path else ""
-    except Exception:
-        note = ""
-    # Contexto relevante do vault (sem reler tudo)
-    ctx = ""
-    try:
-        raw = tool_search_vault(subject or (note[:80]), db=v)
-        results = json.loads(raw) if raw.startswith("[") else []
-        ctx = "\n\n".join(f"- {r.get('title','')}: {r.get('excerpt','')[:300]}" for r in results[:4])
-    except Exception:
-        pass
-    user = (
-        f"EMAIL (resumo destilado):\n{note[:3000]}\n\n"
-        f"CONTEXTO DO VAULT (pode ajudar):\n{ctx or '(sem contexto relevante)'}\n\n"
-        f"Escreva o rascunho de resposta para {reply_to or 'o remetente'}."
-    )
-    body = _call_llm_raw([{"role": "system", "content": DRAFT_SYSTEM}, {"role": "user", "content": user}])
-    subj = subject if subject.lower().startswith("re:") else f"Re: {subject}"
-    did = state.add_draft(v, source="email", ref=ref, subject=subj, body=body,
-                          reply_to=reply_to, note_path=note_path, priority=priority,
-                          from_email=from_email)
-    if did:
-        state.record_event(v, actor="agent", kind="draft",
-                           summary=f"Rascunho de resposta: {subj}"[:200], source="email", ref=ref)
-    return {"id": did, "subject": subj, "body": body, "reply_to": reply_to}
-
-
 def process_email_payload(subject: str = "", sender: str = "", date: str = "", body: str = "",
                           msg_id: str = "", web_link: str = "", vault: Optional[str] = None,
-                          db: str = None, to: str = "", cc: str = "", me: str = "", from_email: str = "", to_emails: str = "", cc_emails: str = "", me_email: str = "") -> dict:
-    """Destila de fato um email (chamado pelo worker). Pode levantar LLMRateLimited,
-    ou EmailIngestFailed se a destilação falhar (o worker tenta de novo e, se não der,
-    avisa com um to-do — um email nunca some em silêncio)."""
+                          db: str = None, to: str = "", cc: str = "", me: str = "", from_email: str = "",
+                          to_emails: str = "", cc_emails: str = "", me_email: str = "") -> dict:
+    """Destila de fato um email (chamado pelo worker): nota no vault + to-dos.
+    Sem prioridade automática (quem prioriza é o usuário, na tela) e sem rascunho
+    automático (o rascunho é pedido no tile Email). O corpo do email não é gravado.
+    Pode levantar LLMRateLimited, ou EmailIngestFailed se a destilação falhar (o worker
+    tenta de novo e, se não der, avisa com um to-do — um email nunca some em silêncio)."""
     db = db or vault
-    priority = _email_priority(me, to, cc, subject, body,
-                               me_email=me_email, to_emails=to_emails, cc_emails=cc_emails)
-    # O LLM precisa saber QUEM é o leitor para extrair as tarefas dele (num email para
-    # "Lucas & Daniel", sem isto ele não sabe que você é o Lucas).
+    # Papel do leitor no email (só para orientar o LLM e o to-do "Responder").
+    role_level = _email_priority(me, to, cc, subject, body,
+                                 me_email=me_email, to_emails=to_emails, cc_emails=cc_emails)
     role = {"alta": "destinatário direto (Para) ou citado — o email é PARA você",
-            "media": "em cópia (Cc) ou citado", "baixa": "não é destinatário direto"}[priority]
+            "media": "em cópia (Cc) ou citado", "baixa": "não é destinatário direto"}[role_level]
     who = (me or "").strip() + (f" <{me_email}>" if me_email else "")
     raw = (
         f"LEITOR (= \"MIM\" nas regras de to-dos): {who or '(não informado)'} — papel: {role}\n"
@@ -1156,51 +1125,163 @@ def process_email_payload(subject: str = "", sender: str = "", date: str = "", b
         f"{body}"
     )
     res = ingest(raw, source_name=f"email: {subject or '(sem assunto)'}", vault=vault, db=db,
-                 todo_priority=priority, todo_source="email", todo_link=web_link)
+                 todo_priority="", todo_source="email", todo_link=web_link)
     path = res.get("path")
     if not path:
         raise EmailIngestFailed(res.get("answer") or "destilação falhou")
-    reason = (_autodraft_block_reason(me, sender, to, cc, subject, body,
-                                      from_email, to_emails, cc_emails)
-              if priority == "alta" else f"prioridade {priority}")
-    # Email prioritário e pessoal sem nenhuma tarefa extraída → ao menos "responder".
-    if priority == "alta" and not reason and not res.get("todos_created"):
+    v = _vault(db)
+
+    # Email dirigido a você (Para/citado), pessoal (não comunicado/notificação) e sem
+    # nenhuma tarefa extraída → ao menos "Responder".
+    personal = role_level == "alta" and not _autodraft_block_reason(
+        me, sender, to, cc, subject, body, from_email, to_emails, cc_emails)
+    if personal and not res.get("todos_created"):
         name = re.sub(r"\s*[-–(<].*$", "", sender or "").strip() or "remetente"
-        tid = state.add_todo(_vault(db), f"Responder {name}: {subject}"[:300], source="email",
-                             ref=path, note_path=path, priority="alta", link=web_link)
+        tid = state.add_todo(v, f"Responder {name}: {subject}"[:300], source="email",
+                             ref=path, note_path=path, link=web_link)
         if tid:
-            state.record_event(_vault(db), actor="agent", kind="todo",
-                               summary=f"[alta] Responder {name}: {subject}"[:200],
-                               source="email", ref=path)
-    if path:
-        _inject_frontmatter_keys(_vault(db), path, {
-            "source":     "outlook",
-            "msg_id":     msg_id,
-            "from":       sender,
-            "email_date": date,
-            "priority":   priority,
-            "web_link":   web_link,
-            "from_email": from_email,
-        })
-        state.record_event(_vault(db), actor="agent", kind="email",
-                           summary=f"[{priority}] Email de {sender}: {subject}"[:200],
-                           source="outlook", ref=msg_id or path)
-        # Auto-rascunho SÓ para prioridade alta E que pareça pedir resposta pessoal
-        # (comunicados globais, no-reply, auto-replies e lista never_draft são poupados).
-        who = f"{sender} <{from_email or 'sem endereço — collector antigo?'}>"
-        if reason:
-            log.info(f"[draft] sem rascunho para {who}: {reason}")
-        else:
-            log.info(f"[draft] gerando rascunho para {who} (prioridade alta, nenhum bloqueio)")
-            try:
-                generate_reply_draft(_vault(db), path, subject, sender, ref=msg_id,
-                                     priority=priority, db=db, from_email=from_email)
-            except sdk_llm.LLMRateLimited:
-                log.warning("[draft] limite do LLM — rascunho adiado (gere sob demanda depois)")
-            except Exception as e:
-                log.warning(f"[draft] falha ao gerar rascunho: {e}")
-    return {"path": path, "priority": priority, "answer": res.get("answer", ""),
-            "sources": res.get("sources", [])}
+            state.record_event(v, actor="agent", kind="todo",
+                               summary=f"Responder {name}: {subject}"[:200], source="email", ref=path)
+
+    _inject_frontmatter_keys(v, path, {
+        "source":     "outlook",
+        "msg_id":     msg_id,
+        "from":       sender,
+        "from_email": from_email,
+        "email_date": date,
+        "web_link":   web_link,
+    })
+    state.upsert_email(v, msg_id or path, subject=subject, sender=sender, from_email=from_email,
+                       email_date=date, note_path=path, web_link=web_link)
+    state.record_event(v, actor="agent", kind="email", summary=f"Email de {sender}: {subject}"[:200],
+                       source="outlook", ref=msg_id or path)
+    return {"path": path, "answer": res.get("answer", ""), "sources": res.get("sources", [])}
+
+
+def backfill_emails(vault: str, days: int = 60) -> int:
+    """Uma vez por vault: preenche a lista do tile Email com os emails já processados
+    (assunto/remetente do histórico de eventos; link e endereço do frontmatter da nota)."""
+    import sqlite3
+    import time
+    v = _vault(vault)
+    if state.kv_get(v, "emails_backfill_v1"):
+        return 0
+    since = time.time() - days * 86400
+    n = 0
+    with sqlite3.connect(state.STATE_DB) as c:
+        c.row_factory = sqlite3.Row
+        evs = c.execute("SELECT ref, summary FROM events WHERE vault=? AND kind='email' AND ts>=? "
+                        "ORDER BY ts", (v, since)).fetchall()
+        notes = {r["item_id"]: (r["note_path"], r["item_date"]) for r in c.execute(
+            "SELECT item_id, note_path, item_date FROM processed_items WHERE source='outlook' AND status='ok'")}
+    for e in evs:
+        msg_id = e["ref"] or ""
+        m = re.match(r"^(?:\[\w+\]\s*)?Email de (.*?): (.*)$", e["summary"] or "")
+        if not msg_id or not m or msg_id not in notes:
+            continue
+        note_path, item_date = notes[msg_id]
+        fm = {}
+        try:
+            fm = _parse_frontmatter(vault_fs.read_note(v, note_path))
+        except Exception:
+            pass
+        state.upsert_email(v, msg_id, subject=m.group(2), sender=m.group(1),
+                           from_email=str(fm.get("from_email") or ""),
+                           email_date=str(fm.get("email_date") or item_date or ""),
+                           note_path=note_path, web_link=str(fm.get("web_link") or ""))
+        n += 1
+    state.kv_set(v, "emails_backfill_v1", n)
+    log.info(f"[emails] lista preenchida com {n} email(s) do histórico")
+    return n
+
+
+# ── Rascunho sob demanda (botão no tile Email) ──────────────────────────────────
+# O corpo completo vem do Outlook pelo collector (que roda no PC) e só passa pela
+# memória: não é gravado no vault nem no banco.
+
+def request_email_draft(vault: str, msg_id: str, from_note: bool = False) -> dict:
+    """Pede um rascunho. Normal: marca 'waiting' e o collector traz o email inteiro.
+    from_note=True: gera já, só com a nota destilada (ex.: PC desligado)."""
+    v = _vault(vault)
+    em = state.get_email(v, msg_id)
+    if not em:
+        return {"ok": False, "error": "email não encontrado"}
+    state.discard_email_drafts(v, msg_id)
+    # Sem EntryID nem Message-ID (com @), o collector não tem como achar o email.
+    if from_note or not (em.get("entry_id") or "@" in msg_id):
+        _start_draft_thread(v, em, full_email="")
+        return {"ok": True, "status": "generating"}
+    state.set_email_draft_status(v, msg_id, "waiting")
+    return {"ok": True, "status": "waiting"}
+
+
+def receive_email_body(vault: str, msg_id: str, found: bool, full_email: str = "", error: str = "") -> dict:
+    """O collector entregou (ou não achou) o email pedido."""
+    v = _vault(vault)
+    em = state.get_email(v, msg_id)
+    if not em or em.get("draft_status") != "waiting":
+        return {"ok": False}
+    if not found:
+        state.set_email_draft_status(v, msg_id, "error",
+                                     error or "o email não foi encontrado no Outlook (movido ou apagado?)")
+        return {"ok": True}
+    _start_draft_thread(v, em, full_email=full_email)
+    return {"ok": True}
+
+
+def _start_draft_thread(v: str, em: dict, full_email: str) -> None:
+    import threading
+    state.set_email_draft_status(v, em["msg_id"], "generating")
+
+    def _run():
+        try:
+            generate_reply_draft(v, em.get("note_path", ""), em.get("subject", ""), em.get("sender", ""),
+                                 ref=em["msg_id"], db=v, from_email=em.get("from_email", ""),
+                                 full_email=full_email)
+            state.set_email_draft_status(v, em["msg_id"], "ready")
+        except sdk_llm.LLMRateLimited:
+            state.set_email_draft_status(v, em["msg_id"], "error",
+                                         "limite de uso do Claude atingido — tente mais tarde")
+        except Exception as e:
+            log.error(f"[draft] erro ao gerar rascunho: {e}")
+            state.set_email_draft_status(v, em["msg_id"], "error", f"erro ao gerar: {e}"[:300])
+
+    threading.Thread(target=_run, daemon=True, name="draft").start()
+
+
+def generate_reply_draft(vault: str, note_path: str, subject: str, reply_to: str,
+                         ref: str = "", priority: str = "", db: str = None,
+                         from_email: str = "", full_email: str = "") -> dict:
+    """Gera um rascunho de resposta: email completo (quando o collector trouxe) + nota
+    destilada + contexto do vault. Pode levantar LLMRateLimited."""
+    v = _vault(db or vault)
+    try:
+        note = tool_read_note(note_path, db=v) if note_path else ""
+    except Exception:
+        note = ""
+    ctx = ""
+    try:
+        raw = tool_search_vault(subject or (note[:80]), db=v)
+        results = json.loads(raw) if raw.startswith("[") else []
+        ctx = "\n\n".join(f"- {r.get('title','')}: {r.get('excerpt','')[:300]}" for r in results[:4])
+    except Exception:
+        pass
+    parts = []
+    if full_email:
+        parts.append(f"EMAIL COMPLETO (inclui o histórico da conversa):\n{full_email[:15000]}")
+    parts.append(f"NOTA DESTILADA DESTE EMAIL:\n{note[:3000] or '(sem nota)'}")
+    parts.append(f"CONTEXTO DO VAULT (pode ajudar):\n{ctx or '(sem contexto relevante)'}")
+    parts.append(f"Escreva o rascunho de resposta para {reply_to or 'o remetente'}, respondendo "
+                 f"a TODOS os pontos e perguntas da mensagem mais recente.")
+    body = _call_llm_raw([{"role": "system", "content": DRAFT_SYSTEM},
+                          {"role": "user", "content": "\n\n".join(parts)}])
+    subj = subject if (subject or "").lower().startswith("re:") else f"Re: {subject}"
+    did = state.add_draft(v, source="email", ref=ref, subject=subj, body=body,
+                          reply_to=reply_to, note_path=note_path, from_email=from_email)
+    if did:
+        state.record_event(v, actor="agent", kind="draft",
+                           summary=f"Rascunho de resposta: {subj}"[:200], source="email", ref=ref)
+    return {"id": did, "subject": subj, "body": body, "reply_to": reply_to}
 
 
 def enqueue_event(subject: str = "", start: str = "", end: str = "", organizer: str = "",
