@@ -1020,37 +1020,46 @@ def _email_priority(me: str, to: str, cc: str, subject: str, body: str,
 
 # Remetentes que nunca merecem rascunho automático (ruído transacional/broadcast).
 _NOREPLY_RE   = re.compile(r"(?i)(no.?reply|do.?not.?reply|n[aã]o.?responda|noreply|donotreply|"
-                           r"postmaster|mailer-?daemon|notifica[cç]|newsletter|automat|auto-?confirm)")
+                           r"postmaster|mailer-?daemon|notifica[cç]|notification|newsletter|automat|"
+                           r"auto-?confirm)")
 _BROADCAST_RE = re.compile(r"(?i)(internal.?comm|comunica[cç][aã]o interna|global comms|global comm|"
                            r"announce|broadcast|comunicados?\b|all.?staff|all.?employees)")
 _AUTOSUBJ_RE  = re.compile(r"(?i)(automatic reply|out of office|auto.?reply|resposta autom[aá]tica|"
                            r"fora do escrit[oó]rio|aus[eê]ncia|on vacation|f[eé]rias)")
 
 
-def _should_autodraft(me: str, sender: str, to: str, cc: str, subject: str, body: str,
-                      from_email: str = "", to_emails: str = "", cc_emails: str = "") -> bool:
-    """Decide se vale gerar rascunho automático. A INGESTÃO não é afetada — só o draft.
-    Suprime: no-reply/notificações, auto-replies, comunicados/broadcast, email de massa
-    e qualquer remetente/destinatário na lista 'never_draft' do usuário."""
+def _autodraft_block_reason(me: str, sender: str, to: str, cc: str, subject: str, body: str,
+                            from_email: str = "", to_emails: str = "", cc_emails: str = "") -> str:
+    """Motivo para NÃO gerar rascunho automático ('' = pode gerar). A INGESTÃO não é
+    afetada — só o rascunho. Barra: lista 'never_draft' do usuário (nome ou endereço
+    do remetente/destinatários), no-reply/notificações, comunicados/broadcast,
+    auto-replies e email de massa."""
     try:
         from core.settings import get_settings
         never = get_settings().get("never_draft", []) or []
     except Exception:
         never = []
     hay = f"{sender} {from_email} {to} {to_emails} {cc} {cc_emails}".lower()
-    if any(p and p in hay for p in never):
-        return False
+    hit = next((p for p in never if p and p in hay), None)
+    if hit:
+        return f"lista 'nunca gerar rascunho' ({hit})"
     s = f"{sender} {from_email}"
-    if _NOREPLY_RE.search(s) or _BROADCAST_RE.search(s):
-        return False
+    if _NOREPLY_RE.search(s):
+        return "remetente no-reply/notificação"
+    if _BROADCAST_RE.search(s):
+        return "remetente de comunicado"
     if _AUTOSUBJ_RE.search(subject or ""):
-        return False
+        return "resposta automática"
     # Email de massa (comunicado/lista de distribuição): muitos destinatários visíveis.
     n = max(len([x for x in re.split(r"[;,]", f"{to};{cc}") if x.strip()]),
             len(_split_emails(to_emails) | _split_emails(cc_emails)))
     if n >= 8:
-        return False
-    return True
+        return f"email de massa ({n} destinatários)"
+    return ""
+
+
+def _should_autodraft(*args, **kwargs) -> bool:
+    return not _autodraft_block_reason(*args, **kwargs)
 
 
 DRAFT_SYSTEM = (
@@ -1064,7 +1073,8 @@ DRAFT_SYSTEM = (
 
 
 def generate_reply_draft(vault: str, note_path: str, subject: str, reply_to: str,
-                         ref: str = "", priority: str = "media", db: str = None) -> dict:
+                         ref: str = "", priority: str = "media", db: str = None,
+                         from_email: str = "") -> dict:
     """Gera um rascunho de resposta a partir da nota destilada + contexto do vault.
     Pode levantar LLMRateLimited (chamada única ao LLM)."""
     v = _vault(db or vault)
@@ -1088,7 +1098,8 @@ def generate_reply_draft(vault: str, note_path: str, subject: str, reply_to: str
     body = _call_llm_raw([{"role": "system", "content": DRAFT_SYSTEM}, {"role": "user", "content": user}])
     subj = subject if subject.lower().startswith("re:") else f"Re: {subject}"
     did = state.add_draft(v, source="email", ref=ref, subject=subj, body=body,
-                          reply_to=reply_to, note_path=note_path, priority=priority)
+                          reply_to=reply_to, note_path=note_path, priority=priority,
+                          from_email=from_email)
     if did:
         state.record_event(v, actor="agent", kind="draft",
                            summary=f"Rascunho de resposta: {subj}"[:200], source="email", ref=ref)
@@ -1121,17 +1132,24 @@ def process_email_payload(subject: str = "", sender: str = "", date: str = "", b
             "email_date": date,
             "priority":   priority,
             "web_link":   web_link,
+            "from_email": from_email,
         })
         state.record_event(_vault(db), actor="agent", kind="email",
                            summary=f"[{priority}] Email de {sender}: {subject}"[:200],
                            source="outlook", ref=msg_id or path)
         # Auto-rascunho SÓ para prioridade alta E que pareça pedir resposta pessoal
         # (comunicados globais, no-reply, auto-replies e lista never_draft são poupados).
-        if priority == "alta" and _should_autodraft(me, sender, to, cc, subject, body,
-                                                    from_email, to_emails, cc_emails):
+        who = f"{sender} <{from_email or 'sem endereço — collector antigo?'}>"
+        reason = (_autodraft_block_reason(me, sender, to, cc, subject, body,
+                                          from_email, to_emails, cc_emails)
+                  if priority == "alta" else f"prioridade {priority}")
+        if reason:
+            log.info(f"[draft] sem rascunho para {who}: {reason}")
+        else:
+            log.info(f"[draft] gerando rascunho para {who} (prioridade alta, nenhum bloqueio)")
             try:
                 generate_reply_draft(_vault(db), path, subject, sender, ref=msg_id,
-                                     priority=priority, db=db)
+                                     priority=priority, db=db, from_email=from_email)
             except sdk_llm.LLMRateLimited:
                 log.warning("[draft] limite do LLM — rascunho adiado (gere sob demanda depois)")
             except Exception as e:

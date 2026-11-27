@@ -1130,6 +1130,14 @@ def api_drafts():
     from core import state
     from agent import _vault as _resolve_vault
     v = _resolve_vault(request.args.get("vault") or None)
+    # Rascunhos pendentes de remetentes que estão (ou entraram depois) na lista
+    # "nunca gerar rascunho" somem do tile.
+    try:
+        n = state.dismiss_drafts_matching(v, app_settings.get_settings().get("never_draft", []))
+        if n:
+            log.info(f"[draft] {n} rascunho(s) descartado(s) pela lista 'nunca gerar rascunho'")
+    except Exception as e:
+        log.warning(f"[draft] limpeza pela lista falhou: {e}")
     return jsonify({"drafts": state.list_drafts(v, status="pending"),
                     "pending": state.count_drafts(v, "pending")})
 

@@ -105,6 +105,7 @@ def init_db() -> None:
                 status     TEXT DEFAULT 'pending',  -- 'pending' | 'sent' | 'dismissed'
                 note_path  TEXT,
                 priority   TEXT DEFAULT 'media',
+                from_email TEXT,            -- endereço do remetente original
                 created_at TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_drafts_status ON drafts (vault, status);
@@ -131,6 +132,10 @@ def init_db() -> None:
             pass
         try:
             c.execute("ALTER TABLE todos ADD COLUMN link TEXT")
+        except Exception:
+            pass
+        try:
+            c.execute("ALTER TABLE drafts ADD COLUMN from_email TEXT")
         except Exception:
             pass
 
@@ -264,23 +269,41 @@ def has_draft(vault: str, ref: str) -> bool:
 
 
 def add_draft(vault: str, source: str, ref: str, subject: str, body: str,
-              reply_to: str = "", note_path: str = "", priority: str = "media") -> int:
+              reply_to: str = "", note_path: str = "", priority: str = "media",
+              from_email: str = "") -> int:
     import time
     if ref and has_draft(vault, ref):
         return 0
     now_iso = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
     with _lock, _conn() as c:
         cur = c.execute(
-            "INSERT INTO drafts (vault, source, ref, reply_to, subject, body, status, note_path, priority, created_at) "
-            "VALUES (?,?,?,?,?,?,'pending',?,?,?)",
-            (vault, source, ref, reply_to, (subject or "")[:300], body or "", note_path, priority, now_iso),
+            "INSERT INTO drafts (vault, source, ref, reply_to, subject, body, status, note_path, priority, "
+            "from_email, created_at) VALUES (?,?,?,?,?,?,'pending',?,?,?,?)",
+            (vault, source, ref, reply_to, (subject or "")[:300], body or "", note_path, priority,
+             (from_email or "").lower(), now_iso),
         )
         return cur.lastrowid
 
 
+def dismiss_drafts_matching(vault: str, patterns: list) -> int:
+    """Descarta rascunhos pendentes cujo remetente (nome ou endereço) contenha algum
+    trecho da lista 'nunca gerar rascunho'. Retorna quantos descartou."""
+    pats = [p.strip().lower() for p in (patterns or []) if p and p.strip()]
+    if not pats:
+        return 0
+    with _lock, _conn() as c:
+        rows = c.execute("SELECT id, reply_to, from_email FROM drafts WHERE vault=? AND status='pending'",
+                         (vault,)).fetchall()
+        ids = [r["id"] for r in rows
+               if any(p in f"{r['reply_to'] or ''} {r['from_email'] or ''}".lower() for p in pats)]
+        for i in ids:
+            c.execute("UPDATE drafts SET status='dismissed' WHERE id=?", (i,))
+    return len(ids)
+
+
 def list_drafts(vault: str, status: str = "pending", limit: int = 100) -> list:
-    q = ("SELECT id, source, ref, reply_to, subject, body, status, note_path, priority, created_at "
-         "FROM drafts WHERE vault=?")
+    q = ("SELECT id, source, ref, reply_to, subject, body, status, note_path, priority, from_email, "
+         "created_at FROM drafts WHERE vault=?")
     params = [vault]
     if status:
         q += " AND status=?"
