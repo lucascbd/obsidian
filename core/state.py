@@ -144,7 +144,7 @@ def init_db() -> None:
 
 # Status considerados "resolvidos" (não reprocessar). 'error' fica de fora de
 # propósito: itens marcados com erro transitório (ex.: timeout 524) são retomados.
-_DONE_STATUSES = ("ok", "pending", "skip")
+_DONE_STATUSES = ("ok", "pending", "skip", "failed")
 
 
 def is_processed(source: str, item_id: str) -> bool:
@@ -344,7 +344,7 @@ def mark_processed(source: str, item_id: str, item_date: str = "",
 
 def processed_ids(source: str, since: str = None) -> list:
     """IDs já processados de uma fonte. since (YYYY-MM-DD) limita por item_date."""
-    done = "('ok','pending','skip')"
+    done = "('ok','pending','skip','failed')"
     if since:
         q = (f"SELECT item_id FROM processed_items WHERE source=? AND status IN {done} "
              "AND (item_date IS NULL OR substr(item_date,1,10) >= ?)")

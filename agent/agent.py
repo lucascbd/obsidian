@@ -766,9 +766,13 @@ NOTAS EXISTENTES NO VAULT:
 {note_ids}
 
 AÇÕES / TO-DOS:
-- Extraia APENAS tarefas acionáveis para MIM (o leitor): algo que EU preciso fazer.
-- Ex.: "responder fulano até sexta", "fazer o treinamento obrigatório X", "revisar a base Y".
-- NÃO invente tarefas; se o conteúdo é só informativo (newsletter, confirmação), deixe a lista vazia.
+- Extraia as tarefas acionáveis para MIM = o LEITOR indicado no topo do conteúdo (quando houver):
+  algo que EU preciso fazer, responder, revisar, enviar, aprovar ou decidir.
+- Pedidos dirigidos a mim contam, mesmo educados ou em outra língua: "could you please share X",
+  "kindly review and share your feedback", "please provide reasons", "pode validar?".
+  Se o email pede algo a mim e a outras pessoas juntas, a tarefa também é minha.
+- Ex.: "Responder Fulano sobre X", "Enviar a base Y completa", "Revisar e validar o arquivo Z".
+- NÃO invente tarefas; se o conteúdo é só informativo (newsletter, comunicado, confirmação), deixe a lista vazia.
 - Cada tarefa: objetiva, com prazo se houver (YYYY-MM-DD), NA MESMA LÍNGUA do conteúdo original.
 
 Responda APENAS com um JSON válido (sem texto antes ou depois):
@@ -814,6 +818,29 @@ def _graph_enrich_search(args: dict, db: str = None) -> str:
         return raw
 
 
+def _parse_llm_json(raw: str) -> Optional[dict]:
+    """Extrai o objeto JSON da resposta do LLM, tolerando o que ele costuma fazer:
+    quebras de linha/tabulações cruas dentro das strings (comum ao reproduzir tabelas
+    — o json.loads padrão rejeita), cerca ```json em volta e texto antes/depois.
+    Não mexe em blocos de código que existam DENTRO da nota."""
+    t = (raw or "").strip()
+    m = re.match(r"^```(?:json)?[ \t]*\n(.*)\n```\s*$", t, re.DOTALL)
+    if m:
+        t = m.group(1)
+    candidates = [t]
+    i, j = t.find("{"), t.rfind("}")
+    if i != -1 and j > i:
+        candidates.append(t[i:j + 1])
+    for c in candidates:
+        try:
+            d = json.loads(c, strict=False)
+            if isinstance(d, dict):
+                return d
+        except Exception:
+            pass
+    return None
+
+
 def ingest(raw_text: str, source_name: str, vault: Optional[str] = None, db: str = None,
            todo_priority: str = "media", todo_source: str = "email", todo_link: str = "") -> dict:
     """Converte texto bruto em nota Obsidian e salva no vault.
@@ -849,20 +876,12 @@ def ingest(raw_text: str, source_name: str, vault: Optional[str] = None, db: str
 
     for attempt in range(3):
         raw = _call_llm_raw(messages)
-        clean = re.sub(r"```(?:json)?\n?(.*?)```", r"\1", raw, flags=re.DOTALL).strip()
-        try:
-            data = json.loads(clean)
-        except Exception:
-            for match in re.finditer(r'\{(?:[^{}]|\{[^{}]*\})*\}', clean, re.DOTALL):
-                try:
-                    data = json.loads(match.group())
-                    break
-                except Exception:
-                    pass
-            else:
-                messages.append({"role": "assistant", "content": raw})
-                messages.append({"role": "user", "content": "Responda APENAS com um JSON válido conforme o formato solicitado."})
-                continue
+        data = _parse_llm_json(raw)
+        if data is None:
+            log.warning(f"[ingest] resposta do LLM não é JSON válido (tentativa {attempt + 1}/3)")
+            messages.append({"role": "assistant", "content": raw})
+            messages.append({"role": "user", "content": "Responda APENAS com um JSON válido conforme o formato solicitado."})
+            continue
 
         path    = data.get("path", "00-inbox/imported.md")
         content = data.get("content", raw_text[:4000])
@@ -905,6 +924,7 @@ def ingest(raw_text: str, source_name: str, vault: Optional[str] = None, db: str
                            summary=f"Importou '{source_name}' → {path}", source="ingest", ref=path)
 
         # To-dos extraídos da destilação → tabela de to-dos (alimenta o tile)
+        todos_created = 0
         try:
             for td in (data.get("todos") or [])[:10]:
                 if isinstance(td, str):
@@ -916,6 +936,7 @@ def ingest(raw_text: str, source_name: str, vault: Optional[str] = None, db: str
                                          ref=path, note_path=path, priority=todo_priority,
                                          link=todo_link)
                     if tid:
+                        todos_created += 1
                         state.record_event(_vault(db), actor="agent", kind="todo",
                                            summary=f"[{todo_priority}] {title}"[:200], source=todo_source, ref=path)
         except Exception as e:
@@ -925,9 +946,10 @@ def ingest(raw_text: str, source_name: str, vault: Optional[str] = None, db: str
             "answer":  f"{summary}\n\nNota criada: `{path}`\n\n{result}",
             "sources": [path],
             "path":    path,
+            "todos_created": todos_created,
         }
 
-    return {"answer": "Falha ao processar o conteúdo após 3 tentativas.", "sources": []}
+    return {"answer": "Falha ao processar o conteúdo após 3 tentativas.", "sources": [], "failed": True}
 
 
 def _inject_frontmatter_keys(vault: str, note_id: str, keys: dict) -> None:
@@ -950,6 +972,10 @@ def _inject_frontmatter_keys(vault: str, note_id: str, keys: dict) -> None:
             return
     fm_block = "---\n" + "\n".join(add_lines) + "\n---\n"
     vault_fs.write_note(vault, note_id, fm_block + content)
+
+
+class EmailIngestFailed(RuntimeError):
+    """A destilação do email falhou (ex.: resposta do LLM ilegível nas 3 tentativas)."""
 
 
 def ingest_email(subject: str, sender: str, date: str, body: str,
@@ -1109,13 +1135,21 @@ def generate_reply_draft(vault: str, note_path: str, subject: str, reply_to: str
 def process_email_payload(subject: str = "", sender: str = "", date: str = "", body: str = "",
                           msg_id: str = "", web_link: str = "", vault: Optional[str] = None,
                           db: str = None, to: str = "", cc: str = "", me: str = "", from_email: str = "", to_emails: str = "", cc_emails: str = "", me_email: str = "") -> dict:
-    """Destila de fato um email (chamado pelo worker). Pode levantar LLMRateLimited."""
+    """Destila de fato um email (chamado pelo worker). Pode levantar LLMRateLimited,
+    ou EmailIngestFailed se a destilação falhar (o worker tenta de novo e, se não der,
+    avisa com um to-do — um email nunca some em silêncio)."""
     db = db or vault
     priority = _email_priority(me, to, cc, subject, body,
                                me_email=me_email, to_emails=to_emails, cc_emails=cc_emails)
+    # O LLM precisa saber QUEM é o leitor para extrair as tarefas dele (num email para
+    # "Lucas & Daniel", sem isto ele não sabe que você é o Lucas).
+    role = {"alta": "destinatário direto (Para) ou citado — o email é PARA você",
+            "media": "em cópia (Cc) ou citado", "baixa": "não é destinatário direto"}[priority]
+    who = (me or "").strip() + (f" <{me_email}>" if me_email else "")
     raw = (
+        f"LEITOR (= \"MIM\" nas regras de to-dos): {who or '(não informado)'} — papel: {role}\n"
         f"Assunto: {subject}\n"
-        f"De: {sender}\n"
+        f"De: {sender}" + (f" <{from_email}>" if from_email else "") + "\n"
         f"Para: {to}\n"
         f"Cc: {cc}\n"
         f"Data: {date}\n\n"
@@ -1124,6 +1158,20 @@ def process_email_payload(subject: str = "", sender: str = "", date: str = "", b
     res = ingest(raw, source_name=f"email: {subject or '(sem assunto)'}", vault=vault, db=db,
                  todo_priority=priority, todo_source="email", todo_link=web_link)
     path = res.get("path")
+    if not path:
+        raise EmailIngestFailed(res.get("answer") or "destilação falhou")
+    reason = (_autodraft_block_reason(me, sender, to, cc, subject, body,
+                                      from_email, to_emails, cc_emails)
+              if priority == "alta" else f"prioridade {priority}")
+    # Email prioritário e pessoal sem nenhuma tarefa extraída → ao menos "responder".
+    if priority == "alta" and not reason and not res.get("todos_created"):
+        name = re.sub(r"\s*[-–(<].*$", "", sender or "").strip() or "remetente"
+        tid = state.add_todo(_vault(db), f"Responder {name}: {subject}"[:300], source="email",
+                             ref=path, note_path=path, priority="alta", link=web_link)
+        if tid:
+            state.record_event(_vault(db), actor="agent", kind="todo",
+                               summary=f"[alta] Responder {name}: {subject}"[:200],
+                               source="email", ref=path)
     if path:
         _inject_frontmatter_keys(_vault(db), path, {
             "source":     "outlook",
@@ -1140,9 +1188,6 @@ def process_email_payload(subject: str = "", sender: str = "", date: str = "", b
         # Auto-rascunho SÓ para prioridade alta E que pareça pedir resposta pessoal
         # (comunicados globais, no-reply, auto-replies e lista never_draft são poupados).
         who = f"{sender} <{from_email or 'sem endereço — collector antigo?'}>"
-        reason = (_autodraft_block_reason(me, sender, to, cc, subject, body,
-                                          from_email, to_emails, cc_emails)
-                  if priority == "alta" else f"prioridade {priority}")
         if reason:
             log.info(f"[draft] sem rascunho para {who}: {reason}")
         else:

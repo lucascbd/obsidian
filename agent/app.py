@@ -1219,9 +1219,10 @@ def _ingest_worker():
             except Exception as e:
                 state.queue_bump(item["id"])
                 if item["attempts"] + 1 >= WORKER_MAX_ATTEMPTS:
-                    state.mark_processed(src, item["item_id"], item_date=item_date, status="skip")
+                    state.mark_processed(src, item["item_id"], item_date=item_date, status="failed")
                     state.queue_delete(item["id"])
                     log.error(f"[worker] desistindo de {item['item_id']} após {WORKER_MAX_ATTEMPTS} tentativas: {e}")
+                    _warn_failed_item(src, p, e)
                 else:
                     log.warning(f"[worker] erro (tentativa {item['attempts'] + 1}): {e}")
                     _t.sleep(5)
@@ -1234,6 +1235,31 @@ def _ingest_worker():
         except Exception as e:
             log.error(f"[worker] erro no loop: {e}")
             _t.sleep(5)
+
+
+def _warn_failed_item(src: str, p: dict, err) -> None:
+    """Um email que não pôde ser processado NUNCA some em silêncio: vira um to-do de
+    aviso (com o link para abrir o email) e um evento na linha do tempo."""
+    from core import state
+    try:
+        v = _agent_mod._vault(p.get("vault") or None)
+        subject = p.get("subject") or "(sem assunto)"
+        sender = p.get("sender") or p.get("organizer") or ""
+        prio = "media"
+        if src != "calendar":
+            prio = _agent_mod._email_priority(
+                p.get("me", ""), p.get("to", ""), p.get("cc", ""), subject, p.get("body", ""),
+                me_email=p.get("me_email", ""), to_emails=p.get("to_emails", ""),
+                cc_emails=p.get("cc_emails", ""))
+        what = "Reunião" if src == "calendar" else "Email"
+        title = f"⚠️ {what} não processado — abrir e tratar: {subject}" + (f" ({sender})" if sender else "")
+        state.add_todo(v, title[:300], source=src, ref=p.get("msg_id") or p.get("event_id") or "",
+                       priority=prio, link=p.get("web_link", ""))
+        state.record_event(v, actor="agent", kind="ingest_failed",
+                           summary=f"{what} não processado: {subject}"[:200], source=src,
+                           detail=str(err)[:1000])
+    except Exception as ex:
+        log.error(f"[worker] não consegui registrar o aviso do item com falha: {ex}")
 
 
 def _start_worker():
