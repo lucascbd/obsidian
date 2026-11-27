@@ -1093,10 +1093,39 @@ DRAFT_SYSTEM = (
     "Conhecimento). Escreva NA MESMA LÍNGUA do email original (inglês→inglês, "
     "português→pt-BR, espanhol→espanhol); não traduza. Tom profissional e objetivo, pronto "
     "para o usuário revisar e enviar. Baseie-se no email completo (quando fornecido), na nota "
-    "destilada e no contexto do vault; "
-    "NÃO invente fatos. Se faltar informação para responder, deixe um marcador claro como "
-    "[confirmar X]. Responda SOMENTE com o corpo do email (sem assunto, sem JSON)."
+    "destilada e no contexto do vault. NÃO invente fatos. Se faltar informação para responder, "
+    "deixe um marcador claro entre colchetes, como [confirmar X] (na língua do email).\n\n"
+    "FORMATO — é o texto que será colado direto no Outlook, então é TEXTO PURO de email, "
+    "NÃO Markdown:\n"
+    "- Proibido: **negrito**, __sublinhado__, # títulos, `crases`, tabelas, links [texto](url).\n"
+    "- Parágrafos curtos, separados por uma linha em branco.\n"
+    "- Listas: cada item numa linha começando com \"• \". Itens numerados: \"1. \", \"2. \"…\n"
+    "- Para destacar o tema de um item, escreva-o no início seguido de dois-pontos "
+    "(ex.: \"1. Taxa de câmbio: …\"), sem negrito.\n"
+    "- Termine com a despedida e o nome do usuário informado no pedido.\n"
+    "Responda SOMENTE com o corpo do email (sem assunto, sem JSON, sem comentários)."
 )
+
+
+def _email_plaintext(text: str) -> str:
+    """Rede de segurança: tira a sintaxe de Markdown que escapar do LLM, para o rascunho
+    colar limpo no Outlook (negrito/itálico, títulos, crases, links e bullets '-'/'*')."""
+    t = (text or "").replace("\r\n", "\n").strip()
+    t = re.sub(r"^```[a-zA-Z]*\n?|\n?```$", "", t)                     # cerca de código em volta
+    t = re.sub(r"\*\*(.+?)\*\*|__(.+?)__", lambda m: m.group(1) or m.group(2), t)
+    t = re.sub(r"(?<![\w*])\*(?!\s)(.+?)(?<!\s)\*(?![\w*])", r"\1", t)   # *itálico*
+    t = re.sub(r"`([^`\n]+)`", r"\1", t)
+    t = re.sub(r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)", r"\1 (\2)", t)   # [texto](url)
+    t = re.sub(r"(?m)^\s{0,3}#{1,6}\s+", "", t)                        # # títulos
+    t = re.sub(r"(?m)^(\s*)[-*+]\s+", lambda m: m.group(1) + "• ", t)   # - item → • item
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    return t.strip()
+
+
+def _user_display_name() -> str:
+    """Nome do usuário para assinar o rascunho ('Sobrenome, Nome' → 'Nome Sobrenome')."""
+    raw = state.kv_get("*", "me_name") or ""
+    return _my_names(raw)[2].title() if raw else ""
 
 
 def process_email_payload(subject: str = "", sender: str = "", date: str = "", body: str = "",
@@ -1109,6 +1138,8 @@ def process_email_payload(subject: str = "", sender: str = "", date: str = "", b
     Pode levantar LLMRateLimited, ou EmailIngestFailed se a destilação falhar (o worker
     tenta de novo e, se não der, avisa com um to-do — um email nunca some em silêncio)."""
     db = db or vault
+    if me and state.kv_get("*", "me_name") != me:
+        state.kv_set("*", "me_name", me)        # para assinar os rascunhos
     # Papel do leitor no email (só para orientar o LLM e o to-do "Responder").
     role_level = _email_priority(me, to, cc, subject, body,
                                  me_email=me_email, to_emails=to_emails, cc_emails=cc_emails)
@@ -1271,10 +1302,12 @@ def generate_reply_draft(vault: str, note_path: str, subject: str, reply_to: str
         parts.append(f"EMAIL COMPLETO (inclui o histórico da conversa):\n{full_email[:15000]}")
     parts.append(f"NOTA DESTILADA DESTE EMAIL:\n{note[:3000] or '(sem nota)'}")
     parts.append(f"CONTEXTO DO VAULT (pode ajudar):\n{ctx or '(sem contexto relevante)'}")
+    me_name = _user_display_name()
     parts.append(f"Escreva o rascunho de resposta para {reply_to or 'o remetente'}, respondendo "
-                 f"a TODOS os pontos e perguntas da mensagem mais recente.")
-    body = _call_llm_raw([{"role": "system", "content": DRAFT_SYSTEM},
-                          {"role": "user", "content": "\n\n".join(parts)}])
+                 f"a TODOS os pontos e perguntas da mensagem mais recente. "
+                 f"Assine como: {me_name or '[seu nome]'}.")
+    body = _email_plaintext(_call_llm_raw([{"role": "system", "content": DRAFT_SYSTEM},
+                                           {"role": "user", "content": "\n\n".join(parts)}]))
     subj = subject if (subject or "").lower().startswith("re:") else f"Re: {subject}"
     did = state.add_draft(v, source="email", ref=ref, subject=subj, body=body,
                           reply_to=reply_to, note_path=note_path, from_email=from_email)

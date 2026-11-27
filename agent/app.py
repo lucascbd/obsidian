@@ -642,10 +642,34 @@ HTML = """<!DOCTYPE html>
     try{await fetch('/api/emails/discard',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vault:getRoot(),msg_id:id})});}catch(e){}
     loadEmails();
   }
-  function copyDraft(id,btn){
+  // Rascunho (texto puro) → HTML de email: parágrafos e linhas "• " viram lista real
+  // no Outlook. A área de transferência leva os dois formatos (HTML + texto puro).
+  function draftHtml(t){
+    var lines=String(t||'').split('\\n'),out=[],para=[],inList=false;
+    function flushPara(){if(para.length){out.push('<p style="margin:0 0 10px 0">'+para.join('<br>')+'</p>');para=[];}}
+    function closeList(){if(inList){out.push('</ul>');inList=false;}}
+    lines.forEach(function(l){
+      var tl=l.trim();
+      if(tl===''){flushPara();closeList();return;}
+      if(tl.indexOf('• ')===0){flushPara();if(!inList){out.push('<ul style="margin:0 0 10px 0;padding-left:22px">');inList=true;}out.push('<li>'+escapeHtml(tl.slice(2))+'</li>');return;}
+      closeList();para.push(escapeHtml(l));
+    });
+    flushPara();closeList();
+    return '<div style="font-family:Aptos,Calibri,Arial,sans-serif;font-size:11pt">'+out.join('')+'</div>';
+  }
+  async function copyDraft(id,btn){
     var ta=document.getElementById('dft'+id);if(!ta)return;
-    ta.select();
-    try{navigator.clipboard.writeText(ta.value);}catch(e){document.execCommand('copy');}
+    var txt=ta.value,ok=false;
+    try{
+      if(window.ClipboardItem&&navigator.clipboard&&navigator.clipboard.write){
+        await navigator.clipboard.write([new ClipboardItem({
+          'text/plain':new Blob([txt],{type:'text/plain'}),
+          'text/html':new Blob([draftHtml(txt)],{type:'text/html'})})]);
+        ok=true;
+      }
+    }catch(e){}
+    if(!ok){try{await navigator.clipboard.writeText(txt);ok=true;}catch(e){}}
+    if(!ok){ta.select();document.execCommand('copy');}
     var o=btn.textContent;btn.textContent='✅ Copiado';setTimeout(function(){btn.textContent=o;},1500);
   }
 
